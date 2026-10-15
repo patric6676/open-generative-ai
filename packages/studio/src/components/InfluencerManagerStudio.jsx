@@ -36,7 +36,7 @@ import {
   makeId,
   bestHourFor,
 } from "../influencerManager.js";
-import { generateBatch, GROUPS } from "../promptRandomizer.js";
+import { generateBatch, GROUPS, MODES } from "../promptRandomizer.js";
 
 const T2I_MODEL = "nano-banana-pro";
 const EDIT_MODEL = "nano-banana-pro-edit";
@@ -288,11 +288,19 @@ function PostCard({ post, profile, busy, onUpdate, onGenerate, onDelete }) {
 function RandomizerTab({ profile, busyIds, onGenerate, onUseAppearance, onAddToPlan }) {
   const [locked, setLocked] = useState([]);
   const [count, setCount] = useState(3);
+  const [mode, setMode] = useState("alltag");
   const [items, setItems] = useState([]);
 
-  const roll = () => {
+  const roll = (m = mode) => {
     const base = items[0]?.traits || null;
-    setItems(generateBatch(count, base, locked).map((r) => ({ ...r, id: makeId("idea"), imageUrl: "" })));
+    setItems(generateBatch(count, base, locked, Math.random, m).map((r) => ({ ...r, id: makeId("idea"), imageUrl: "" })));
+  };
+
+  // Switching the mode re-rolls right away; a locked person carries over.
+  const switchMode = (m) => {
+    if (m === mode) return;
+    setMode(m);
+    roll(m);
   };
 
   // Start with a batch so the tab shows what it does right away.
@@ -310,9 +318,26 @@ function RandomizerTab({ profile, busyIds, onGenerate, onUseAppearance, onAddToP
   return (
     <div className="space-y-4 max-w-4xl">
       <div className="rounded-xl border border-white/[0.07] bg-[#121212] p-4 space-y-3">
-        <p className="text-[12px] text-gray-400">
-          Zufällige Instagram-Fotoprompts für Frauen zwischen 20 und 25. Fixiere Bereiche, die gleich bleiben sollen –
-          z. B. „Person“, um dieselbe Frau in immer neuen Szenen zu zeigen.
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="inline-flex rounded-lg border border-white/10 bg-white/[0.03] p-0.5" role="group" aria-label="Stil">
+            {Object.entries(MODES).map(([id, label]) => (
+              <button key={id} type="button" onClick={() => switchMode(id)} aria-pressed={mode === id}
+                className={`px-3 py-1.5 rounded-md text-[12px] font-semibold transition-colors ${
+                  mode === id ? "bg-violet-600 text-white" : "text-gray-400 hover:text-gray-200"
+                }`}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <p className="text-[12px] text-gray-400 flex-1 min-w-[220px]">
+            {mode === "glamour"
+              ? "Bademode, Fitness-, Abend- und Resort-Looks im Stil von Mode-Shootings – elegant und Instagram-konform."
+              : "Alltags- und Lifestyle-Fotos im typischen Instagram-Stil."}
+          </p>
+        </div>
+        <p className="text-[12px] text-gray-500">
+          Frauen zwischen 20 und 25. Fixiere Bereiche, die gleich bleiben sollen – z. B. „Person“, um dieselbe Frau
+          in immer neuen Szenen zu zeigen, auch beim Wechsel zwischen Alltag und Glamour.
         </p>
         <div className="flex flex-wrap items-center gap-2">
           {Object.entries(GROUPS).map(([id, g]) => (
@@ -327,7 +352,7 @@ function RandomizerTab({ profile, busyIds, onGenerate, onUseAppearance, onAddToP
             value={count} onChange={(e) => setCount(Number(e.target.value))}>
             {[1, 3, 5, 10].map((n) => <option key={n} value={n}>{n} {n === 1 ? "Prompt" : "Prompts"}</option>)}
           </select>
-          <button className={primaryBtnCls} onClick={roll}>🎲 Würfeln</button>
+          <button className={primaryBtnCls} onClick={() => roll()}>🎲 Würfeln</button>
         </div>
       </div>
 
@@ -561,7 +586,7 @@ export default function InfluencerManagerStudio({
       profileId: profile.id,
       platform,
       format: "Foto",
-      pillar: "Prompt-Idee",
+      pillar: item.traits.mode === "glamour" ? "Glamour" : "Prompt-Idee",
       scene: "",
       scheduledAt: when.toISOString(),
       status: image ? "bild" : "idee",
