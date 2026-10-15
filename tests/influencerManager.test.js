@@ -434,3 +434,22 @@ test('reference image prompt: appearance first and unchanged, adult, no empty su
     // Profile without age gets an adult age range instead of none.
     assert.match(buildAvatarPrompt({ appearance: 'woman with red hair' }), /^adult in their mid-twenties, woman with red hair/);
 });
+
+test('caption hooks fit every niche and never repeat within a week', async () => {
+    const { createDefaultState, addPresetProfiles, planWeek } = await load();
+    const { state } = addPresetProfiles(createDefaultState());
+    // Words that tie a hook to one niche (the old cooking/travel/tech/fashion lines).
+    const nicheWords = /rezept|koche|outfit|tool|ort\b|touri|wallet|look/i;
+    for (const profile of state.profiles) {
+        for (const seed of [1, 7, 42]) {
+            const posts = planWeek(profile, new Date('2026-10-19T00:00:00'), null, seeded(seed));
+            const firstLines = posts.map((p) => p.caption.split('\n')[0]);
+            for (const [i, line] of firstLines.entries()) {
+                assert.ok(line.includes(posts[i].pillar), `${profile.name}: hook names the pillar: ${line}`);
+                assert.doesNotMatch(line.replace(posts[i].pillar, ''), nicheWords, `${profile.name}: ${line}`);
+                assert.ok(!line.includes('{pillar}'), line);
+            }
+            if (posts.length <= 5) assert.equal(new Set(firstLines).size, posts.length, `${profile.name}: ${firstLines}`);
+        }
+    }
+});
