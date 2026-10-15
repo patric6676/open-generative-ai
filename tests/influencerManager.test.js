@@ -170,3 +170,47 @@ test('CSV export neutralises spreadsheet formulas', async () => {
     assert.ok(line.startsWith("'@SUM(1+1)"), line);
     assert.ok(line.includes(`"'=cmd|"" /C calc""!A0"`), line);
 });
+
+test('ensurePlanned plans exactly one week and is idempotent', async () => {
+    const { createDefaultState, ensurePlanned, applyPlan } = await load();
+    let state = createDefaultState();
+    const now = new Date('2026-10-15T10:00:00');
+    const first = ensurePlanned(state, now, seeded());
+    // One week per profile: 5 + 4 + 6 + 4 + 5 posts.
+    assert.equal(first.added.length, 24);
+    state = applyPlan(state, first);
+    assert.equal(ensurePlanned(state, now, seeded()).added.length, 0, 'second run must not duplicate');
+    // A week later exactly one more week is added, after the covered range.
+    const covered = Math.min(...Object.values(first.plannedUntil).map((d) => +new Date(d)));
+    const more = ensurePlanned(state, new Date('2026-10-22T10:00:00'), seeded());
+    assert.equal(more.added.length, 24);
+    assert.ok(more.added.every((p) => +new Date(p.scheduledAt) >= covered));
+});
+
+test('ensurePlanned respects planAheadDays and handles data without coverage', async () => {
+    const { createDefaultState, ensurePlanned } = await load();
+    const state = createDefaultState();
+    state.settings.planAheadDays = 14;
+    const now = new Date('2026-10-15T10:00:00');
+    const { added } = ensurePlanned(state, now, seeded());
+    assert.equal(added.length, 48, 'two full weeks for 14 days ahead');
+    // Old data without plannedUntil falls back to the last open post.
+    state.settings.planAheadDays = 7;
+    state.posts = added;
+    assert.equal(ensurePlanned(state, now, seeded()).added.length, 0);
+});
+
+test('pickAutoImageQueue is opt-in and respects the daily cap', async () => {
+    const { createDefaultState, ensurePlanned, pickAutoImageQueue } = await load();
+    const state = createDefaultState();
+    const now = new Date('2026-10-15T10:00:00');
+    state.posts = ensurePlanned(state, now, seeded()).added;
+    assert.equal(pickAutoImageQueue(state, now).length, 0, 'off by default');
+    state.settings.autoImages = true;
+    state.settings.imagesPerDay = 3;
+    const queue = pickAutoImageQueue(state, now);
+    assert.ok(queue.length <= 3 && queue.length > 0);
+    assert.ok(queue.every((p) => +new Date(p.scheduledAt) <= +now + 2 * 86400000));
+    state.settings.imageLog = { date: '2026-10-15', count: 3 };
+    assert.equal(pickAutoImageQueue(state, now).length, 0, 'quota used up');
+});

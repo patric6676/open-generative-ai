@@ -15,6 +15,10 @@ import {
   safeImageUrl,
   createDefaultState,
   parseState,
+  sanitizeSettings,
+  ensurePlanned,
+  applyPlan,
+  pickAutoImageQueue,
   planWeek,
   computeInsights,
   buildCaption,
@@ -264,6 +268,10 @@ export default function InfluencerManagerStudio({
   const [statusFilter, setStatusFilter] = useState("offen");
   const [followerInput, setFollowerInput] = useState("");
   const importRef = useRef(null);
+  // Latest state for the background automation, which runs outside renders.
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  const autoImagesRunning = useRef(false);
 
   // Load after mount so SSR markup matches the first client render.
   useEffect(() => {
@@ -345,8 +353,8 @@ export default function InfluencerManagerStudio({
 
   // With a reference avatar, use the edit model so the face stays consistent.
   const generatePostImage = async (post) => {
-    if (!requireKey()) return;
-    const owner = state.profiles.find((p) => p.id === post.profileId);
+    if (!requireKey()) return null;
+    const owner = stateRef.current.profiles.find((p) => p.id === post.profileId);
     const aspect_ratio = post.format === "Reel" || post.format === "Story" ? "9:16" : PLATFORMS[post.platform]?.aspectRatio || "4:5";
     const reference = safeImageUrl(owner?.avatarUrl);
     const url = await runGeneration(post.id, () => (reference
@@ -358,6 +366,7 @@ export default function InfluencerManagerStudio({
         })
       : generateImage(apiKey, { model: T2I_MODEL, prompt: post.prompt, aspect_ratio })));
     if (url) updatePost(post.id, { imageUrl: url, status: post.status === "idee" ? "bild" : post.status });
+    return url;
   };
 
   const generateAllOpen = async (profileIds) => {
@@ -379,7 +388,16 @@ export default function InfluencerManagerStudio({
       const newPosts = s.profiles
         .filter((p) => profileIds.includes(p.id))
         .flatMap((p) => planWeek(p, start, computeInsights(p, s.posts)));
-      return { ...s, posts: [...s.posts, ...newPosts] };
+      // Remember the coverage so the automatic planner continues after this week.
+      const end = new Date(start);
+      end.setHours(0, 0, 0, 0);
+      end.setDate(end.getDate() + 7);
+      return {
+        ...s,
+        posts: [...s.posts, ...newPosts],
+        profiles: s.profiles.map((p) => (profileIds.includes(p.id) && !(p.plannedUntil && new Date(p.plannedUntil) >= end)
+          ? { ...p, plannedUntil: end.toISOString() } : p)),
+      };
     });
     toast.success(profileIds.length > 1 ? "Wochenplan für alle 5 Profile erstellt" : "Wochenplan erstellt");
     setView("plan");
@@ -418,6 +436,53 @@ export default function InfluencerManagerStudio({
       toast.error("Backup konnte nicht gelesen werden");
     }
   };
+
+  const settings = sanitizeSettings(state.settings);
+  const updateSettings = (patch) =>
+    setState((s) => ({ ...s, settings: { ...sanitizeSettings(s.settings), ...patch } }));
+
+  // Automation: while the app is open, check on start and then hourly that
+  // every profile is planned ahead, and (opt-in) pre-generate images for
+  // posts due in the next two days, within the daily credit cap.
+  useEffect(() => {
+    if (!loaded) return undefined;
+    const tick = async () => {
+      const current = stateRef.current;
+      const cfg = sanitizeSettings(current.settings);
+      let added = [];
+      if (cfg.autoPlan) {
+        const plan = ensurePlanned(current);
+        added = plan.added;
+        // Coverage is saved even when nothing new was needed, so the next
+        // check starts from the right day.
+        setState((s) => applyPlan(s, plan));
+        if (added.length) toast.success(`Automatisch geplant: ${added.length} neue Posts`);
+      }
+      if (!cfg.autoImages || !apiKey || autoImagesRunning.current) return;
+      const queue = pickAutoImageQueue({ ...current, posts: [...current.posts, ...added] });
+      if (queue.length === 0) return;
+      autoImagesRunning.current = true;
+      try {
+        for (const post of queue) {
+          // eslint-disable-next-line no-await-in-loop
+          const url = await generatePostImage(post);
+          if (!url) break; // stop on the first failure instead of burning credits
+          const today = new Date().toISOString().slice(0, 10);
+          setState((s) => {
+            const log = sanitizeSettings(s.settings).imageLog;
+            const count = log.date === today ? log.count + 1 : 1;
+            return { ...s, settings: { ...sanitizeSettings(s.settings), imageLog: { date: today, count } } };
+          });
+        }
+      } finally {
+        autoImagesRunning.current = false;
+      }
+    };
+    tick();
+    const timer = setInterval(tick, 60 * 60 * 1000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded, apiKey, settings.autoPlan, settings.autoImages, settings.planAheadDays, settings.imagesPerDay]);
 
   const allIds = state.profiles.map((p) => p.id);
   const dueToday = state.posts.filter((p) => p.status === "freigegeben" && new Date(p.scheduledAt) <= new Date());
@@ -467,7 +532,7 @@ export default function InfluencerManagerStudio({
       {/* Main */}
       <main className="flex-1 min-w-0 min-h-0 flex flex-col">
         <div className="flex flex-wrap items-center gap-1 px-4 md:px-6 pt-4 pb-3 border-b border-white/[0.07] shrink-0">
-          {[["plan", "Content-Plan"], ["profil", "Profil"], ["analytics", "Reichweite"], ["overview", "Übersicht"]].map(([id, label]) => (
+          {[["plan", "Content-Plan"], ["profil", "Profil"], ["analytics", "Reichweite"], ["overview", "Übersicht"], ["auto", "Automatik"]].map(([id, label]) => (
             <button key={id} type="button" onClick={() => setView(id)}
               className={`px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-colors ${view === id ? "bg-white/10 text-white" : "text-gray-500 hover:text-gray-300"}`}>
               {label}
@@ -551,6 +616,49 @@ export default function InfluencerManagerStudio({
                   </p>
                 )}
               </div>
+            </div>
+          )}
+
+          {view === "auto" && (
+            <div className="space-y-4 max-w-2xl">
+              <div className="rounded-xl border border-white/[0.07] bg-[#121212] p-4 space-y-3">
+                <label className="flex items-start gap-3 cursor-pointer">
+                  <input id="auto-plan" type="checkbox" className="mt-0.5 accent-violet-500" checked={settings.autoPlan}
+                    onChange={(e) => updateSettings({ autoPlan: e.target.checked })} />
+                  <span>
+                    <span className="block text-[13px] font-semibold">Content-Plan automatisch erstellen</span>
+                    <span className="block text-[11px] text-gray-500">Beim Öffnen der App und danach stündlich wird für jedes Profil nachgeplant, sodass immer genug Posts geplant sind. Die Planung nutzt deine Reichweiten-Daten.</span>
+                  </span>
+                </label>
+                <Field label="Immer so viele Tage im Voraus planen">
+                  <input id="plan-ahead" type="number" min={3} max={28} className={inputCls + " max-w-[120px]"} value={settings.planAheadDays}
+                    onChange={(e) => updateSettings({ planAheadDays: Number(e.target.value) })} />
+                </Field>
+              </div>
+
+              <div className="rounded-xl border border-white/[0.07] bg-[#121212] p-4 space-y-3">
+                <label className="flex items-start gap-3 cursor-pointer">
+                  <input id="auto-images" type="checkbox" className="mt-0.5 accent-violet-500" checked={settings.autoImages}
+                    onChange={(e) => updateSettings({ autoImages: e.target.checked })} />
+                  <span>
+                    <span className="block text-[13px] font-semibold">Bilder automatisch generieren</span>
+                    <span className="block text-[11px] text-gray-500">Erzeugt Bilder für Posts, die in den nächsten 2 Tagen fällig sind. Kostet MuAPI-Guthaben, deshalb mit Tageslimit. Freigeben musst du weiterhin selbst.</span>
+                  </span>
+                </label>
+                <Field label="Maximal Bilder pro Tag">
+                  <input id="images-per-day" type="number" min={0} max={50} className={inputCls + " max-w-[120px]"} value={settings.imagesPerDay}
+                    onChange={(e) => updateSettings({ imagesPerDay: Number(e.target.value) })} />
+                </Field>
+                <p className="text-[11px] text-gray-500">
+                  Heute automatisch erzeugt: {settings.imageLog.date === new Date().toISOString().slice(0, 10) ? settings.imageLog.count : 0} / {settings.imagesPerDay}
+                  {!apiKey && " · Ohne MuAPI-Key werden keine Bilder erzeugt."}
+                </p>
+              </div>
+
+              <p className="text-[11px] text-gray-600 leading-relaxed">
+                Die Automatik läuft, solange die App in einem Browser-Tab offen ist. Ist sie zu, holt sie beim nächsten Öffnen alles nach.
+                Veröffentlicht wird nichts automatisch: Exportiere freigegebene Posts per „Plan als CSV“ in ein Planungs-Tool, das sie zur geplanten Zeit postet.
+              </p>
             </div>
           )}
 
