@@ -525,6 +525,12 @@ npm run electron:build:all
 
 Installers are output to the `release/` folder. Pre-built binaries are also available on the [Releases page](https://github.com/Anil-matcha/Open-Generative-AI/releases).
 
+### Keeping your instance private
+
+- `npm run dev` only listens on `127.0.0.1`. Use `npm run dev:lan` if you deliberately want other devices on your network to reach it.
+- Set `APP_PASSWORD` (and optionally `APP_USER`, default `admin`) to put the whole app, including every `/api` route, behind a login. Copy `.env.example` to `.env` for Docker Compose; the compose file also binds the port to `127.0.0.1` only.
+- Before exposing an instance to the internet, put it behind HTTPS (for example a reverse proxy) and set `APP_PASSWORD`, otherwise anyone with the URL can use it.
+
 ## 🏗️ Architecture
 
 The app is a **Next.js monorepo** with a shared `packages/studio` component library.

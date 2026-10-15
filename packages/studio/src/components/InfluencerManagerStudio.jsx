@@ -10,18 +10,40 @@ import {
   PLATFORMS,
   FORMATS,
   POST_STATUS,
+  TONES,
+  MAX_IMPORT_BYTES,
+  safeImageUrl,
   createDefaultState,
   parseState,
+  sanitizeSettings,
+  ensurePlanned,
+  applyPlan,
+  pickAutoImageQueue,
+  bufferExportFor,
+  buildBufferCsv,
+  markPublishedExports,
   planWeek,
   computeInsights,
   buildCaption,
   buildImagePrompt,
   engagementRate,
   exportScheduleCsv,
+  IMAGE_QUALITY,
+  imageModelsFor,
+  estimateImageCost,
+  weeklyImageEstimate,
+  bulkImageQueue,
+  formatUsd,
+  MAX_PROFILES,
+  addPresetProfiles,
+  missingPresetCount,
+  createBlankProfile,
+  removeProfile,
+  makeId,
+  bestHourFor,
 } from "../influencerManager.js";
+import { generateBatch, GROUPS, MODES } from "../promptRandomizer.js";
 
-const T2I_MODEL = "nano-banana-pro";
-const EDIT_MODEL = "nano-banana-pro-edit";
 
 const STATUS_LABEL = { idee: "Idee", bild: "Bild fertig", freigegeben: "Freigegeben", gepostet: "Gepostet" };
 const STATUS_STYLE = {
@@ -39,7 +61,8 @@ function loadState() {
   if (typeof window === "undefined") return createDefaultState();
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    return raw ? parseState(raw) : createDefaultState();
+    // First start: the 5 starter profiles plus the 15 ready-made ones.
+    return raw ? parseState(raw) : addPresetProfiles(createDefaultState()).state;
   } catch {
     return createDefaultState();
   }
@@ -87,7 +110,8 @@ function Kpi({ label, value, hint }) {
 }
 
 // ─── Profile editor ─────────────────────────────────────────────────────────
-function ProfileTab({ profile, onChange, onGenerateAvatar, busy }) {
+function ProfileTab({ profile, onChange, onGenerateAvatar, busy, onDelete, canDelete, postCount }) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const set = (key) => (e) => onChange({ [key]: e.target.value });
   const setList = (key) => (e) => onChange({ [key]: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) });
   const togglePlatform = (id) => {
@@ -99,8 +123,8 @@ function ProfileTab({ profile, onChange, onGenerateAvatar, busy }) {
     <div className="grid grid-cols-1 lg:grid-cols-[240px_1fr] gap-6">
       <div className="space-y-3">
         <div className="aspect-[3/4] rounded-2xl overflow-hidden border border-white/[0.08] bg-[#141414] flex items-center justify-center">
-          {profile.avatarUrl ? (
-            <img src={profile.avatarUrl} alt={profile.name} className="w-full h-full object-cover" />
+          {safeImageUrl(profile.avatarUrl) ? (
+            <img src={safeImageUrl(profile.avatarUrl)} alt={profile.name} referrerPolicy="no-referrer" className="w-full h-full object-cover" />
           ) : (
             <p className="text-[11px] text-gray-600 text-center px-6">Noch kein Referenzbild. Es sorgt dafür, dass das Gesicht in allen Posts gleich bleibt.</p>
           )}
@@ -108,9 +132,12 @@ function ProfileTab({ profile, onChange, onGenerateAvatar, busy }) {
         <button className={primaryBtnCls + " w-full"} disabled={busy} onClick={onGenerateAvatar}>
           {busy ? "Generiere…" : profile.avatarUrl ? "Neues Referenzbild" : "Referenzbild generieren"}
         </button>
-        <Field label="Oder Bild-URL einfügen">
-          <input className={inputCls} value={profile.avatarUrl} onChange={set("avatarUrl")} placeholder="https://…" />
+        <Field label="Oder Bild-URL einfügen (nur https)">
+          <input className={inputCls} value={profile.avatarUrl} onChange={set("avatarUrl")} placeholder="https://…" maxLength={2048} />
         </Field>
+        {profile.avatarUrl && !safeImageUrl(profile.avatarUrl) && (
+          <p className="text-[11px] text-red-300">Nur https-Bildlinks werden verwendet.</p>
+        )}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 content-start">
@@ -119,7 +146,7 @@ function ProfileTab({ profile, onChange, onGenerateAvatar, busy }) {
         <Field label="Nische"><input className={inputCls} value={profile.niche} onChange={set("niche")} /></Field>
         <Field label="Tonalität">
           <select className={inputCls} value={profile.tone} onChange={set("tone")}>
-            {["motivierend", "neugierig", "witzig", "herzlich", "selbstbewusst"].map((t) => <option key={t} value={t}>{t}</option>)}
+            {TONES.map((t) => <option key={t} value={t}>{t}</option>)}
           </select>
         </Field>
         <div className="md:col-span-2">
@@ -152,6 +179,19 @@ function ProfileTab({ profile, onChange, onGenerateAvatar, busy }) {
             ))}
           </div>
         </Field>
+        {canDelete && (
+          <div className="md:col-span-2 flex flex-wrap items-center gap-2 pt-3 border-t border-white/[0.06]">
+            {confirmDelete ? (
+              <>
+                <span className="text-[12px] text-red-300">{profile.name} und {postCount} Posts endgültig löschen?</span>
+                <button className={btnCls + " text-red-300"} onClick={onDelete}>Ja, löschen</button>
+                <button className={btnCls} onClick={() => setConfirmDelete(false)}>Abbrechen</button>
+              </>
+            ) : (
+              <button className={btnCls + " text-red-300"} onClick={() => setConfirmDelete(true)}>Profil löschen</button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -163,13 +203,13 @@ function PostCard({ post, profile, busy, onUpdate, onGenerate, onDelete }) {
   const er = engagementRate(post.metrics);
 
   return (
-    <div className="rounded-xl border border-white/[0.07] bg-[#121212] p-3 flex gap-3">
-      <div className="w-28 shrink-0">
+    <div className="rounded-xl border border-white/[0.07] bg-[#121212] p-3 flex flex-col sm:flex-row gap-3">
+      <div className="w-full max-w-[160px] sm:w-28 shrink-0">
         <div className="aspect-[4/5] rounded-lg overflow-hidden bg-[#1a1a1a] border border-white/[0.06] flex items-center justify-center">
           {busy ? (
             <div className="w-6 h-6 border-2 border-violet-500/20 border-t-violet-500 rounded-full animate-spin" />
-          ) : post.imageUrl ? (
-            <img src={post.imageUrl} alt={post.pillar} className="w-full h-full object-cover" />
+          ) : safeImageUrl(post.imageUrl) ? (
+            <img src={safeImageUrl(post.imageUrl)} alt={post.pillar} referrerPolicy="no-referrer" className="w-full h-full object-cover" />
           ) : (
             <span className="text-[10px] text-gray-600">kein Bild</span>
           )}
@@ -177,8 +217,8 @@ function PostCard({ post, profile, busy, onUpdate, onGenerate, onDelete }) {
         <button className={btnCls + " w-full mt-2"} disabled={busy} onClick={onGenerate}>
           {post.imageUrl ? "Neu" : "Bild"} generieren
         </button>
-        {post.imageUrl && (
-          <button className={btnCls + " w-full mt-1"} onClick={() => downloadImage(post.imageUrl, `${profile.handle.replace("@", "")}_${post.id}.png`)}>
+        {safeImageUrl(post.imageUrl) && (
+          <button className={btnCls + " w-full mt-1"} onClick={() => downloadImage(safeImageUrl(post.imageUrl), `${profile.handle.replace(/[^A-Za-z0-9._-]/g, "") || "post"}_${post.id}.png`)}>
             Download
           </button>
         )}
@@ -196,6 +236,9 @@ function PostCard({ post, profile, busy, onUpdate, onGenerate, onDelete }) {
             {FORMATS.map((f) => <option key={f} value={f}>{f}</option>)}
           </select>
           <span className="text-[11px] text-violet-300 font-semibold">{post.pillar}</span>
+          {post.exportedAt && post.status !== "gepostet" && (
+            <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-violet-500/15 text-violet-300">in Buffer</span>
+          )}
           <input type="datetime-local" className="ml-auto bg-transparent text-[11px] text-gray-400 outline-none"
             value={toLocalInput(post.scheduledAt)}
             onChange={(e) => e.target.value && onUpdate({ scheduledAt: new Date(e.target.value).toISOString() })} />
@@ -211,7 +254,7 @@ function PostCard({ post, profile, busy, onUpdate, onGenerate, onDelete }) {
         </details>
 
         {post.status === "gepostet" && (
-          <div className="grid grid-cols-5 gap-1.5">
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
             {["reach", "likes", "comments", "shares", "saves"].map((k) => (
               <label key={k} className="block">
                 <span className="block text-[9px] uppercase text-gray-600 font-bold">
@@ -220,7 +263,7 @@ function PostCard({ post, profile, busy, onUpdate, onGenerate, onDelete }) {
                 <input type="number" min={0} className={inputCls + " py-1"} value={post.metrics?.[k] ?? ""} onChange={setMetric(k)} />
               </label>
             ))}
-            <p className="col-span-5 text-[11px] text-gray-500">Engagement: <span className="text-white font-semibold">{(er * 100).toFixed(1)} %</span></p>
+            <p className="col-span-2 sm:col-span-5 text-[11px] text-gray-500">Engagement: <span className="text-white font-semibold">{(er * 100).toFixed(1)} %</span></p>
           </div>
         )}
 
@@ -235,9 +278,122 @@ function PostCard({ post, profile, busy, onUpdate, onGenerate, onDelete }) {
           ) : (
             <button className={btnCls} onClick={() => onUpdate({ status: post.imageUrl ? "freigegeben" : "idee" })}>Zurücksetzen</button>
           )}
+          {post.exportedAt && post.status !== "gepostet" && (
+            <button className={btnCls} onClick={() => onUpdate({ exportedAt: "" })}>Erneut exportieren</button>
+          )}
           <button className={btnCls + " ml-auto text-red-300"} onClick={onDelete}>Löschen</button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─── Prompt randomizer ──────────────────────────────────────────────────────
+function RandomizerTab({ profile, busyIds, onGenerate, onUseAppearance, onAddToPlan }) {
+  const [locked, setLocked] = useState([]);
+  const [count, setCount] = useState(3);
+  const [mode, setMode] = useState("alltag");
+  const [items, setItems] = useState([]);
+
+  const roll = (m = mode) => {
+    const base = items[0]?.traits || null;
+    setItems(generateBatch(count, base, locked, Math.random, m).map((r) => ({ ...r, id: makeId("idea"), imageUrl: "" })));
+  };
+
+  // Switching the mode re-rolls right away; a locked person carries over.
+  const switchMode = (m) => {
+    if (m === mode) return;
+    setMode(m);
+    roll(m);
+  };
+
+  // Start with a batch so the tab shows what it does right away.
+  useEffect(() => { roll(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const toggleLock = (group) =>
+    setLocked((l) => (l.includes(group) ? l.filter((g) => g !== group) : [...l, group]));
+  const updateItem = (id, patch) => setItems((list) => list.map((it) => (it.id === id ? { ...it, ...patch } : it)));
+
+  const generate = async (item) => {
+    const url = await onGenerate(item);
+    if (url) updateItem(item.id, { imageUrl: url });
+  };
+
+  return (
+    <div className="space-y-4 max-w-4xl">
+      <div className="rounded-xl border border-white/[0.07] bg-[#121212] p-4 space-y-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="inline-flex rounded-lg border border-white/10 bg-white/[0.03] p-0.5" role="group" aria-label="Stil">
+            {Object.entries(MODES).map(([id, label]) => (
+              <button key={id} type="button" onClick={() => switchMode(id)} aria-pressed={mode === id}
+                className={`px-3 py-1.5 rounded-md text-[12px] font-semibold transition-colors ${
+                  mode === id ? "bg-violet-600 text-white" : "text-gray-400 hover:text-gray-200"
+                }`}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <p className="text-[12px] text-gray-400 flex-1 min-w-[220px]">
+            {mode === "glamour"
+              ? "Bademode, Fitness-, Abend- und Resort-Looks im Stil von Mode-Shootings – elegant und Instagram-konform."
+              : "Alltags- und Lifestyle-Fotos im typischen Instagram-Stil."}
+          </p>
+        </div>
+        <p className="text-[12px] text-gray-500">
+          Frauen zwischen 20 und 25. Fixiere Bereiche, die gleich bleiben sollen – z. B. „Person“, um dieselbe Frau
+          in immer neuen Szenen zu zeigen, auch beim Wechsel zwischen Alltag und Glamour.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          {Object.entries(GROUPS).map(([id, g]) => (
+            <button key={id} type="button" onClick={() => toggleLock(id)}
+              className={`px-2.5 py-1 rounded-md text-[11px] font-semibold border transition-colors ${
+                locked.includes(id) ? "bg-violet-600/30 border-violet-500/50 text-white" : "bg-white/[0.03] border-white/10 text-gray-400"
+              }`}>
+              {locked.includes(id) ? "🔒 " : ""}{g.label} {locked.includes(id) ? "fixiert" : "zufällig"}
+            </button>
+          ))}
+          <select id="idea-count" className="ml-auto bg-[#161616] border border-white/[0.08] rounded-lg px-3 py-2 text-[12px] text-gray-200 outline-none"
+            value={count} onChange={(e) => setCount(Number(e.target.value))}>
+            {[1, 3, 5, 10].map((n) => <option key={n} value={n}>{n} {n === 1 ? "Prompt" : "Prompts"}</option>)}
+          </select>
+          <button className={primaryBtnCls} onClick={() => roll()}>🎲 Würfeln</button>
+        </div>
+      </div>
+
+      {items.map((item) => (
+        <div key={item.id} className="rounded-xl border border-white/[0.07] bg-[#121212] p-3 flex flex-col sm:flex-row gap-3">
+          <div className="w-full max-w-[160px] sm:w-32 shrink-0">
+            <div className="aspect-[4/5] rounded-lg overflow-hidden bg-[#1a1a1a] border border-white/[0.06] flex items-center justify-center">
+              {busyIds[item.id] ? (
+                <div className="w-6 h-6 border-2 border-violet-500/20 border-t-violet-500 rounded-full animate-spin" />
+              ) : safeImageUrl(item.imageUrl) ? (
+                <img src={safeImageUrl(item.imageUrl)} alt="" referrerPolicy="no-referrer" className="w-full h-full object-cover" />
+              ) : (
+                <span className="text-[10px] text-gray-600">kein Bild</span>
+              )}
+            </div>
+            <button className={btnCls + " w-full mt-2"} disabled={!!busyIds[item.id]} onClick={() => generate(item)}>
+              {item.imageUrl ? "Neu" : "Bild"} generieren
+            </button>
+          </div>
+          <div className="flex-1 min-w-0 space-y-2">
+            <div className="flex flex-wrap gap-1">
+              {[`${item.traits.age} Jahre`, item.traits.origin, item.traits.hairColor, item.traits.aesthetic, item.traits.location].map((t) => (
+                <span key={t} className="px-2 py-0.5 rounded-md text-[10px] bg-white/[0.05] text-gray-400">{t}</span>
+              ))}
+            </div>
+            <textarea className={inputCls + " h-28 resize-y text-[11px]"} value={item.prompt}
+              onChange={(e) => updateItem(item.id, { prompt: e.target.value })} />
+            <div className="flex flex-wrap gap-1.5">
+              <button className={btnCls} onClick={() => {
+                navigator.clipboard?.writeText(item.prompt).then(() => toast.success("Prompt kopiert"), () => toast.error("Kopieren nicht möglich – Text markieren und kopieren"));
+              }}>Kopieren</button>
+              <button className={btnCls} onClick={() => onAddToPlan(item)}>In Content-Plan von {profile.name}</button>
+              <button className={btnCls} onClick={() => onUseAppearance(item)}>Als Aussehen von {profile.name}</button>
+            </div>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -249,8 +405,17 @@ export default function InfluencerManagerStudio({
   onGenerationEnd,
   onGenerationComplete,
   onGenerationError,
+  // Optional: hosts where a plain browser download is blocked (e.g. a
+  // sandboxed page) pass their own saver. Resolves true when the file was saved.
+  onDownload,
 }) {
   const [state, setState] = useState(createDefaultState);
+
+  const saveFile = async (filename, text, type) => {
+    if (onDownload) return onDownload(filename, text, type);
+    downloadText(filename, text, type);
+    return true;
+  };
   const [loaded, setLoaded] = useState(false);
   const [activeId, setActiveId] = useState("profile_1");
   const [view, setView] = useState("plan");
@@ -258,6 +423,11 @@ export default function InfluencerManagerStudio({
   const [statusFilter, setStatusFilter] = useState("offen");
   const [followerInput, setFollowerInput] = useState("");
   const importRef = useRef(null);
+  const [bulkConfirm, setBulkConfirm] = useState(null);
+  // Latest state for the background automation, which runs outside renders.
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  const autoImagesRunning = useRef(false);
 
   // Load after mount so SSR markup matches the first client render.
   useEffect(() => {
@@ -310,9 +480,10 @@ export default function InfluencerManagerStudio({
     onGenerationStart?.();
     try {
       const res = await fn();
-      if (!res?.url) throw new Error("Keine Bild-URL in der Antwort.");
-      onGenerationComplete?.({ url: res.url });
-      return res.url;
+      const url = safeImageUrl(res?.url);
+      if (!url) throw new Error("Keine gültige https-Bild-URL in der Antwort.");
+      onGenerationComplete?.({ url });
+      return url;
     } catch (err) {
       const message = formatErrorMessage(err);
       toast.error(message);
@@ -326,8 +497,9 @@ export default function InfluencerManagerStudio({
 
   const generateAvatar = async (target = profile) => {
     if (!requireKey()) return;
+    const models = imageModelsFor(stateRef.current.settings, "avatar");
     const url = await runGeneration(`avatar_${target.id}`, () => generateImage(apiKey, {
-      model: T2I_MODEL,
+      model: models.t2i,
       prompt: `Ultra-realistic portrait photo of ${target.appearance}, neutral background, soft studio light, looking at camera, sharp facial detail`,
       aspect_ratio: "3:4",
     }));
@@ -338,29 +510,42 @@ export default function InfluencerManagerStudio({
 
   // With a reference avatar, use the edit model so the face stays consistent.
   const generatePostImage = async (post) => {
-    if (!requireKey()) return;
-    const owner = state.profiles.find((p) => p.id === post.profileId);
+    if (!requireKey()) return null;
+    const owner = stateRef.current.profiles.find((p) => p.id === post.profileId);
     const aspect_ratio = post.format === "Reel" || post.format === "Story" ? "9:16" : PLATFORMS[post.platform]?.aspectRatio || "4:5";
-    const url = await runGeneration(post.id, () => (owner?.avatarUrl
+    const reference = safeImageUrl(owner?.avatarUrl);
+    const models = imageModelsFor(stateRef.current.settings, "post");
+    const url = await runGeneration(post.id, () => (reference
       ? generateI2I(apiKey, {
-          model: EDIT_MODEL,
-          images_list: [owner.avatarUrl],
+          model: models.edit,
+          images_list: [reference],
           prompt: `Same person as in the reference image, identical face. ${post.prompt}`,
           aspect_ratio,
         })
-      : generateImage(apiKey, { model: T2I_MODEL, prompt: post.prompt, aspect_ratio })));
+      : generateImage(apiKey, { model: models.t2i, prompt: post.prompt, aspect_ratio })));
     if (url) updatePost(post.id, { imageUrl: url, status: post.status === "idee" ? "bild" : post.status });
+    return url;
   };
 
-  const generateAllOpen = async (profileIds) => {
+  // Bulk generation asks first and shows the estimated cost, because one
+  // click across 20 profiles can mean dozens of paid images.
+  const requestBulkImages = (profileIds) => {
     if (!requireKey()) return;
-    const queue = state.posts.filter((p) => profileIds.includes(p.profileId) && !p.imageUrl && p.status !== "gepostet");
-    if (queue.length === 0) { toast("Keine offenen Posts ohne Bild."); return; }
+    const queue = bulkImageQueue(state, profileIds);
+    if (queue.length === 0) { toast("Keine offenen Posts ohne Bild in den nächsten 7 Tagen."); return; }
+    setBulkConfirm({ profileIds, count: queue.length, cost: estimateImageCost(queue.length, state.settings) });
+  };
+
+  const runBulkImages = async () => {
+    const { profileIds } = bulkConfirm;
+    setBulkConfirm(null);
+    const queue = bulkImageQueue(stateRef.current, profileIds);
     toast(`${queue.length} Bilder werden generiert…`);
     // Sequential on purpose: keeps credit usage predictable and avoids rate limits.
     for (const post of queue) {
       // eslint-disable-next-line no-await-in-loop
-      await generatePostImage(post);
+      const url = await generatePostImage(post);
+      if (!url) break; // stop on the first failure instead of burning credits
     }
   };
 
@@ -371,10 +556,76 @@ export default function InfluencerManagerStudio({
       const newPosts = s.profiles
         .filter((p) => profileIds.includes(p.id))
         .flatMap((p) => planWeek(p, start, computeInsights(p, s.posts)));
-      return { ...s, posts: [...s.posts, ...newPosts] };
+      // Remember the coverage so the automatic planner continues after this week.
+      const end = new Date(start);
+      end.setHours(0, 0, 0, 0);
+      end.setDate(end.getDate() + 7);
+      return {
+        ...s,
+        posts: [...s.posts, ...newPosts],
+        profiles: s.profiles.map((p) => (profileIds.includes(p.id) && !(p.plannedUntil && new Date(p.plannedUntil) >= end)
+          ? { ...p, plannedUntil: end.toISOString() } : p)),
+      };
     });
-    toast.success(profileIds.length > 1 ? "Wochenplan für alle 5 Profile erstellt" : "Wochenplan erstellt");
+    toast.success(profileIds.length > 1 ? `Wochenplan für alle ${profileIds.length} Profile erstellt` : "Wochenplan erstellt");
     setView("plan");
+  };
+
+  const exportToBuffer = async (platform) => {
+    const { ready, skipped } = bufferExportFor(state, profile.id, platform);
+    if (skipped.length) {
+      toast.error(`${skipped.length} Posts übersprungen: Bild fehlt oder der Link endet nicht auf .jpg/.png/.webp.`);
+    }
+    if (ready.length === 0) {
+      toast("Keine neuen freigegebenen Posts mit Bild für diesen Kanal.");
+      return;
+    }
+    const handle = profile.handle.replace(/[^A-Za-z0-9._-]/g, "") || "profil";
+    const saved = await saveFile(`buffer_${handle}_${platform}_${new Date().toISOString().slice(0, 10)}.csv`, buildBufferCsv(ready), "text/csv;charset=utf-8");
+    if (!saved) return; // nothing left the app, so don't mark the posts as exported
+    const ids = new Set(ready.map((p) => p.id));
+    const exportedAt = new Date().toISOString();
+    setState((s) => ({ ...s, posts: s.posts.map((p) => (ids.has(p.id) ? { ...p, exportedAt } : p)) }));
+    toast.success(`${ready.length} ${ready.length === 1 ? "Post" : "Posts"} für ${PLATFORMS[platform].label} exportiert. Jetzt in Buffer beim Kanal von ${profile.handle} hochladen.`);
+  };
+
+  const generateIdeaImage = async (item) => {
+    if (!requireKey()) return null;
+    const models = imageModelsFor(stateRef.current.settings, "post");
+    return runGeneration(item.id, () => generateImage(apiKey, { model: models.t2i, prompt: item.prompt, aspect_ratio: "4:5" }));
+  };
+
+  const useIdeaAppearance = (item) => {
+    const image = safeImageUrl(item.imageUrl);
+    updateProfile({ appearance: item.appearance, ...(image ? { avatarUrl: image } : {}) });
+    toast.success(image
+      ? `Aussehen und Referenzbild von ${profile.name} übernommen`
+      : `Aussehen übernommen – erzeuge im Tab „Profil“ ein neues Referenzbild`);
+  };
+
+  const addIdeaToPlan = (item) => {
+    const platform = profile.platforms[0] || "instagram";
+    const when = new Date();
+    when.setDate(when.getDate() + 1);
+    when.setHours(bestHourFor(platform), 0, 0, 0);
+    const image = safeImageUrl(item.imageUrl);
+    const post = {
+      id: makeId("post"),
+      profileId: profile.id,
+      platform,
+      format: "Foto",
+      pillar: item.traits.mode === "glamour" ? "Glamour" : "Prompt-Idee",
+      scene: "",
+      scheduledAt: when.toISOString(),
+      status: image ? "bild" : "idee",
+      imageUrl: image,
+      exportedAt: "",
+      metrics: null,
+      prompt: item.prompt,
+    };
+    post.caption = buildCaption(profile, post);
+    setState((s) => ({ ...s, posts: [...s.posts, post] }));
+    toast.success(`Zum Content-Plan von ${profile.name} hinzugefügt (morgen ${String(when.getHours()).padStart(2, "0")}:00)`);
   };
 
   const refreshPrompts = () => {
@@ -395,8 +646,13 @@ export default function InfluencerManagerStudio({
   };
 
   const importBackup = async (file) => {
+    if (file.size > MAX_IMPORT_BYTES) {
+      toast.error("Backup ist größer als 5 MB und wurde nicht importiert.");
+      return;
+    }
     try {
       const text = await file.text();
+      JSON.parse(text); // reject non-JSON instead of silently resetting to defaults
       const parsed = parseState(text);
       setState(parsed);
       setActiveId(parsed.profiles[0]?.id);
@@ -406,28 +662,117 @@ export default function InfluencerManagerStudio({
     }
   };
 
+  const settings = sanitizeSettings(state.settings);
+  const updateSettings = (patch) =>
+    setState((s) => ({ ...s, settings: { ...sanitizeSettings(s.settings), ...patch } }));
+
+  // Automation: while the app is open, check on start and then hourly that
+  // every profile is planned ahead, and (opt-in) pre-generate images for
+  // posts due in the next two days, within the daily credit cap.
+  useEffect(() => {
+    if (!loaded) return undefined;
+    const tick = async () => {
+      const current = stateRef.current;
+      const cfg = sanitizeSettings(current.settings);
+      const published = markPublishedExports(current);
+      if (published.changed) {
+        setState((s) => markPublishedExports(s).state);
+        toast(`${published.changed} Posts wurden von Buffer veröffentlicht – trag die Reichweite ein.`);
+      }
+      let added = [];
+      if (cfg.autoPlan) {
+        const plan = ensurePlanned(current);
+        added = plan.added;
+        // Coverage is saved even when nothing new was needed, so the next
+        // check starts from the right day.
+        setState((s) => applyPlan(s, plan));
+        if (added.length) toast.success(`Automatisch geplant: ${added.length} neue Posts`);
+      }
+      if (!cfg.autoImages || !apiKey || autoImagesRunning.current) return;
+      const queue = pickAutoImageQueue({ ...current, posts: [...current.posts, ...added] });
+      if (queue.length === 0) return;
+      autoImagesRunning.current = true;
+      try {
+        for (const post of queue) {
+          // eslint-disable-next-line no-await-in-loop
+          const url = await generatePostImage(post);
+          if (!url) break; // stop on the first failure instead of burning credits
+          const today = new Date().toISOString().slice(0, 10);
+          setState((s) => {
+            const log = sanitizeSettings(s.settings).imageLog;
+            const count = log.date === today ? log.count + 1 : 1;
+            return { ...s, settings: { ...sanitizeSettings(s.settings), imageLog: { date: today, count } } };
+          });
+        }
+      } finally {
+        autoImagesRunning.current = false;
+      }
+    };
+    tick();
+    const timer = setInterval(tick, 60 * 60 * 1000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Re-run when profiles are added or removed so new ones get planned at once.
+  }, [loaded, apiKey, settings.autoPlan, settings.autoImages, settings.planAheadDays, settings.imagesPerDay, state.profiles.length]);
+
+  const presetsMissing = missingPresetCount(state);
+
+  const addPresets = () => {
+    const { state: next, added } = addPresetProfiles(state);
+    setState(next);
+    toast.success(`${added} Profile hinzugefügt – sie werden automatisch eingeplant.`);
+  };
+
+  // New profile with a random adult woman (20–25) from the prompt randomizer.
+  const addRandomProfile = () => {
+    const [idea] = generateBatch(1);
+    const created = createBlankProfile(idea.appearance, state.profiles.length);
+    setState((s) => ({ ...s, profiles: [...s.profiles, created] }));
+    setActiveId(created.id);
+    setView("profil");
+    toast.success("Neues Profil angelegt – Name, Nische und Plattformen anpassen.");
+  };
+
+  const deleteProfile = () => {
+    const name = profile.name;
+    const next = removeProfile(state, profile.id);
+    setState(next);
+    setActiveId(next.profiles[0].id);
+    toast.success(`${name} gelöscht`);
+  };
+
   const allIds = state.profiles.map((p) => p.id);
   const dueToday = state.posts.filter((p) => p.status === "freigegeben" && new Date(p.scheduledAt) <= new Date());
 
   return (
-    <div className="h-full w-full flex bg-[#0b0b0b] text-white overflow-hidden">
+    <div className="h-full w-full flex flex-col md:flex-row bg-[#0b0b0b] text-white overflow-hidden">
       {/* Profiles sidebar */}
-      <aside className="w-[220px] shrink-0 border-r border-white/[0.07] bg-[#101010] flex flex-col">
+      <aside className="w-full md:w-[220px] shrink-0 border-b md:border-b-0 md:border-r border-white/[0.07] bg-[#101010] flex flex-col max-h-[45%] md:max-h-none">
         <div className="px-4 py-4 border-b border-white/[0.07]">
           <p className="text-[13px] font-bold">Influencer Manager</p>
-          <p className="text-[10px] text-gray-500 mt-0.5">5 KI-Profile · Plan · Reichweite</p>
+          <p className="text-[10px] text-gray-500 mt-0.5">{state.profiles.length} KI-Profile · Plan · Reichweite</p>
+          {(presetsMissing > 0 || state.profiles.length < MAX_PROFILES) && (
+            <div className="flex flex-wrap gap-1.5 mt-2">
+              {presetsMissing > 0 && (
+                <button className={btnCls + " px-2 py-1 text-[11px]"} onClick={addPresets}>+ {presetsMissing} Vorlagen</button>
+              )}
+              {state.profiles.length < MAX_PROFILES && (
+                <button className={btnCls + " px-2 py-1 text-[11px]"} onClick={addRandomProfile}>+ Neues Profil</button>
+              )}
+            </div>
+          )}
         </div>
-        <div className="flex-1 overflow-y-auto p-2 space-y-1">
+        <div className="md:flex-1 flex md:block gap-1 overflow-x-auto md:overflow-y-auto p-2 md:space-y-1">
           {state.profiles.map((p) => {
             const ins = insightsById[p.id];
             const open = state.posts.filter((x) => x.profileId === p.id && x.status !== "gepostet").length;
             return (
               <button key={p.id} type="button" onClick={() => setActiveId(p.id)}
-                className={`w-full flex items-center gap-2.5 p-2 rounded-xl text-left transition-colors ${
+                className={`min-w-[170px] md:min-w-0 w-full flex items-center gap-2.5 p-2 rounded-xl text-left transition-colors ${
                   p.id === profile.id ? "bg-violet-600/20 border border-violet-500/40" : "border border-transparent hover:bg-white/[0.04]"
                 }`}>
                 <div className="w-10 h-10 rounded-full overflow-hidden bg-[#1c1c1c] shrink-0 flex items-center justify-center text-[13px] font-bold text-gray-500">
-                  {p.avatarUrl ? <img src={p.avatarUrl} alt="" className="w-full h-full object-cover" /> : p.name.slice(0, 1)}
+                  {safeImageUrl(p.avatarUrl) ? <img src={safeImageUrl(p.avatarUrl)} alt="" referrerPolicy="no-referrer" className="w-full h-full object-cover" /> : p.name.slice(0, 1)}
                 </div>
                 <div className="min-w-0">
                   <p className="text-[12px] font-semibold truncate">{p.name}</p>
@@ -438,12 +783,12 @@ export default function InfluencerManagerStudio({
             );
           })}
         </div>
-        <div className="p-3 border-t border-white/[0.07] space-y-1.5">
+        <div className="p-3 border-t border-white/[0.07] grid grid-cols-2 md:grid-cols-1 gap-1.5">
           <button className={primaryBtnCls + " w-full"} onClick={() => createWeekPlan(allIds)}>Wochenplan für alle</button>
-          <button className={btnCls + " w-full"} disabled={Object.keys(busyIds).length > 0} onClick={() => generateAllOpen(allIds)}>Alle Bilder generieren</button>
-          <button className={btnCls + " w-full"} onClick={() => downloadText(`content-plan_${new Date().toISOString().slice(0, 10)}.csv`, exportScheduleCsv(state), "text/csv;charset=utf-8")}>Plan als CSV</button>
-          <div className="flex gap-1.5">
-            <button className={btnCls + " flex-1"} onClick={() => downloadText("influencer-backup.json", JSON.stringify(state, null, 2), "application/json")}>Backup</button>
+          <button className={btnCls + " w-full"} disabled={Object.keys(busyIds).length > 0} onClick={() => requestBulkImages(allIds)}>Alle Bilder generieren</button>
+          <button className={btnCls + " w-full"} onClick={() => saveFile(`content-plan_${new Date().toISOString().slice(0, 10)}.csv`, exportScheduleCsv(state), "text/csv;charset=utf-8")}>Plan als CSV</button>
+          <div className="flex gap-1.5 col-span-2 md:col-span-1">
+            <button className={btnCls + " flex-1"} onClick={() => saveFile("influencer-backup.json", JSON.stringify(state, null, 2), "application/json")}>Backup</button>
             <button className={btnCls + " flex-1"} onClick={() => importRef.current?.click()}>Import</button>
             <input ref={importRef} type="file" accept="application/json" className="hidden"
               onChange={(e) => { const f = e.target.files?.[0]; if (f) importBackup(f); e.target.value = ""; }} />
@@ -452,9 +797,9 @@ export default function InfluencerManagerStudio({
       </aside>
 
       {/* Main */}
-      <main className="flex-1 min-w-0 flex flex-col">
-        <div className="flex items-center gap-1 px-6 pt-4 pb-3 border-b border-white/[0.07] shrink-0">
-          {[["plan", "Content-Plan"], ["profil", "Profil"], ["analytics", "Reichweite"], ["overview", "Übersicht"]].map(([id, label]) => (
+      <main className="flex-1 min-w-0 min-h-0 flex flex-col">
+        <div className="flex flex-wrap items-center gap-1 px-4 md:px-6 pt-4 pb-3 border-b border-white/[0.07] shrink-0">
+          {[["plan", "Content-Plan"], ["profil", "Profil"], ["analytics", "Reichweite"], ["ideen", "Prompt-Ideen"], ["overview", "Übersicht"], ["auto", "Automatik"]].map(([id, label]) => (
             <button key={id} type="button" onClick={() => setView(id)}
               className={`px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-colors ${view === id ? "bg-white/10 text-white" : "text-gray-500 hover:text-gray-300"}`}>
               {label}
@@ -465,22 +810,46 @@ export default function InfluencerManagerStudio({
           )}
         </div>
 
-        <div className="flex-1 overflow-y-auto p-6">
+        <div className="flex-1 overflow-y-auto p-4 md:p-6">
+          {bulkConfirm && (
+            <div className="max-w-4xl mb-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 flex flex-wrap items-center gap-3">
+              <p className="text-[12px] text-amber-100 flex-1 min-w-[220px]">
+                {bulkConfirm.count} Bilder für Posts der nächsten 7 Tage generieren?
+                Kosten ca. <span className="font-bold">{formatUsd(bulkConfirm.cost)}</span> ({IMAGE_QUALITY[settings.imageQuality].label}-Qualität).
+              </p>
+              <button className={primaryBtnCls} onClick={runBulkImages}>Ja, generieren</button>
+              <button className={btnCls} onClick={() => setBulkConfirm(null)}>Abbrechen</button>
+            </div>
+          )}
           {view === "profil" && (
-            <ProfileTab profile={profile} onChange={updateProfile} busy={!!busyIds[`avatar_${profile.id}`]} onGenerateAvatar={() => generateAvatar(profile)} />
+            <ProfileTab key={profile.id} profile={profile} onChange={updateProfile} busy={!!busyIds[`avatar_${profile.id}`]} onGenerateAvatar={() => generateAvatar(profile)}
+              canDelete={state.profiles.length > 1} onDelete={deleteProfile}
+              postCount={state.posts.filter((p) => p.profileId === profile.id).length} />
           )}
 
           {view === "plan" && (
             <div className="space-y-3 max-w-4xl">
               <div className="flex flex-wrap items-center gap-2">
                 <button className={primaryBtnCls} onClick={() => createWeekPlan([profile.id])}>+ Wochenplan für {profile.name}</button>
-                <button className={btnCls} disabled={Object.keys(busyIds).length > 0} onClick={() => generateAllOpen([profile.id])}>Offene Bilder generieren</button>
+                <button className={btnCls} disabled={Object.keys(busyIds).length > 0} onClick={() => requestBulkImages([profile.id])}>Offene Bilder generieren</button>
                 <button className={btnCls} onClick={refreshPrompts}>Prompts aus Profil erneuern</button>
                 <select className="ml-auto bg-[#161616] border border-white/[0.08] rounded-lg px-3 py-2 text-[12px] text-gray-200 outline-none" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
                   <option value="offen">Offen</option>
                   <option value="alle">Alle</option>
                   {POST_STATUS.map((s) => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}
                 </select>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 rounded-xl border border-white/[0.07] bg-[#121212] px-3 py-2">
+                <span className="text-[11px] font-semibold text-gray-400">Für Buffer exportieren:</span>
+                {profile.platforms.map((pl) => {
+                  const n = bufferExportFor(state, profile.id, pl).ready.length;
+                  return (
+                    <button key={pl} className={btnCls} disabled={n === 0} onClick={() => exportToBuffer(pl)}>
+                      {PLATFORMS[pl]?.label || pl} ({n})
+                    </button>
+                  );
+                })}
+                <span className="text-[10px] text-gray-600 w-full">Nur freigegebene Posts mit Bild. Danach in Buffer: Kanal öffnen → Bulk Upload → Datei hochladen.</span>
               </div>
               {!profile.avatarUrl && (
                 <p className="text-[11px] text-amber-300/80">Tipp: Erst im Tab „Profil“ ein Referenzbild erzeugen – dann sieht {profile.name} in jedem Post gleich aus.</p>
@@ -538,6 +907,88 @@ export default function InfluencerManagerStudio({
                   </p>
                 )}
               </div>
+            </div>
+          )}
+
+          {view === "ideen" && (
+            <RandomizerTab profile={profile} busyIds={busyIds} onGenerate={generateIdeaImage}
+              onUseAppearance={useIdeaAppearance} onAddToPlan={addIdeaToPlan} />
+          )}
+
+          {view === "auto" && (
+            <div className="space-y-4 max-w-2xl">
+              <div className="rounded-xl border border-white/[0.07] bg-[#121212] p-4 space-y-3">
+                <p className="text-[13px] font-semibold">Bildkosten</p>
+                <div className="grid sm:grid-cols-2 gap-2" role="radiogroup" aria-label="Bildqualität">
+                  {Object.entries(IMAGE_QUALITY).map(([id, q]) => (
+                    <button key={id} type="button" role="radio" aria-checked={settings.imageQuality === id}
+                      onClick={() => updateSettings({ imageQuality: id })}
+                      className={`text-left rounded-lg border px-3 py-2.5 transition-colors ${
+                        settings.imageQuality === id ? "border-violet-500/60 bg-violet-600/15" : "border-white/10 bg-white/[0.02] hover:bg-white/[0.05]"
+                      }`}>
+                      <span className="block text-[13px] font-semibold">{q.label} · ca. {formatUsd(q.pricePerImage)} pro Bild</span>
+                      <span className="block text-[11px] text-gray-500">{q.model}{id === "sparsam" ? " – reicht für Instagram-Auflösung" : " – feinere Details, 4× teurer"}</span>
+                    </button>
+                  ))}
+                </div>
+                <label className="flex items-start gap-3 cursor-pointer">
+                  <input id="avatar-premium" type="checkbox" className="mt-0.5 accent-violet-500" checked={settings.avatarPremium}
+                    onChange={(e) => updateSettings({ avatarPremium: e.target.checked })} />
+                  <span>
+                    <span className="block text-[12px] font-semibold">Referenzbilder immer in Premium</span>
+                    <span className="block text-[11px] text-gray-500">Wird pro Profil nur einmal erzeugt und bestimmt das Gesicht in allen Posts – lohnt sich.</span>
+                  </span>
+                </label>
+                <p className="text-[11px] text-gray-500">
+                  {(() => {
+                    const { posts, cost } = weeklyImageEstimate(state);
+                    const premium = estimateImageCost(posts, { ...settings, imageQuality: "premium" });
+                    return `Bei ${posts} Posts pro Woche: ca. ${formatUsd(cost)} pro Woche, ${formatUsd(cost * 4.3)} pro Monat`
+                      + (settings.imageQuality !== "premium" ? ` (in Premium: ${formatUsd(premium)} pro Woche).` : ".");
+                  })()}
+                  {" "}Preise laut MuAPI, Stand Oktober 2026 – abgerechnet wird der tatsächliche Betrag.
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-white/[0.07] bg-[#121212] p-4 space-y-3">
+                <label className="flex items-start gap-3 cursor-pointer">
+                  <input id="auto-plan" type="checkbox" className="mt-0.5 accent-violet-500" checked={settings.autoPlan}
+                    onChange={(e) => updateSettings({ autoPlan: e.target.checked })} />
+                  <span>
+                    <span className="block text-[13px] font-semibold">Content-Plan automatisch erstellen</span>
+                    <span className="block text-[11px] text-gray-500">Beim Öffnen der App und danach stündlich wird für jedes Profil nachgeplant, sodass immer genug Posts geplant sind. Die Planung nutzt deine Reichweiten-Daten.</span>
+                  </span>
+                </label>
+                <Field label="Immer so viele Tage im Voraus planen">
+                  <input id="plan-ahead" type="number" min={3} max={28} className={inputCls + " max-w-[120px]"} value={settings.planAheadDays}
+                    onChange={(e) => updateSettings({ planAheadDays: Number(e.target.value) })} />
+                </Field>
+              </div>
+
+              <div className="rounded-xl border border-white/[0.07] bg-[#121212] p-4 space-y-3">
+                <label className="flex items-start gap-3 cursor-pointer">
+                  <input id="auto-images" type="checkbox" className="mt-0.5 accent-violet-500" checked={settings.autoImages}
+                    onChange={(e) => updateSettings({ autoImages: e.target.checked })} />
+                  <span>
+                    <span className="block text-[13px] font-semibold">Bilder automatisch generieren</span>
+                    <span className="block text-[11px] text-gray-500">Erzeugt Bilder für Posts, die in den nächsten 2 Tagen fällig sind. Kostet MuAPI-Guthaben, deshalb mit Tageslimit. Freigeben musst du weiterhin selbst.</span>
+                  </span>
+                </label>
+                <Field label="Maximal Bilder pro Tag">
+                  <input id="images-per-day" type="number" min={0} max={50} className={inputCls + " max-w-[120px]"} value={settings.imagesPerDay}
+                    onChange={(e) => updateSettings({ imagesPerDay: Number(e.target.value) })} />
+                </Field>
+                <p className="text-[11px] text-gray-500">
+                  Heute automatisch erzeugt: {settings.imageLog.date === new Date().toISOString().slice(0, 10) ? settings.imageLog.count : 0} / {settings.imagesPerDay}
+                  {!apiKey && " · Ohne MuAPI-Key werden keine Bilder erzeugt."}
+                </p>
+              </div>
+
+              <p className="text-[11px] text-gray-600 leading-relaxed">
+                Die Automatik läuft, solange die App in einem Browser-Tab offen ist. Ist sie zu, holt sie beim nächsten Öffnen alles nach.
+                Veröffentlicht wird über Buffer: Im Content-Plan freigegebene Posts mit „Für Buffer exportieren“ herunterladen und in Buffer hochladen.
+                Sobald die geplante Zeit vorbei ist, setzt die App diese Posts automatisch auf „Gepostet“, damit du die Reichweite eintragen kannst.
+              </p>
             </div>
           )}
 
