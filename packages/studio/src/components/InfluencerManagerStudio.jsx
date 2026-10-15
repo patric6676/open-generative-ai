@@ -19,6 +19,9 @@ import {
   ensurePlanned,
   applyPlan,
   pickAutoImageQueue,
+  bufferExportFor,
+  buildBufferCsv,
+  markPublishedExports,
   planWeek,
   computeInsights,
   buildCaption,
@@ -206,6 +209,9 @@ function PostCard({ post, profile, busy, onUpdate, onGenerate, onDelete }) {
             {FORMATS.map((f) => <option key={f} value={f}>{f}</option>)}
           </select>
           <span className="text-[11px] text-violet-300 font-semibold">{post.pillar}</span>
+          {post.exportedAt && post.status !== "gepostet" && (
+            <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-violet-500/15 text-violet-300">in Buffer</span>
+          )}
           <input type="datetime-local" className="ml-auto bg-transparent text-[11px] text-gray-400 outline-none"
             value={toLocalInput(post.scheduledAt)}
             onChange={(e) => e.target.value && onUpdate({ scheduledAt: new Date(e.target.value).toISOString() })} />
@@ -244,6 +250,9 @@ function PostCard({ post, profile, busy, onUpdate, onGenerate, onDelete }) {
             <button className={btnCls} onClick={() => onUpdate({ status: "gepostet" })}>Als gepostet markieren</button>
           ) : (
             <button className={btnCls} onClick={() => onUpdate({ status: post.imageUrl ? "freigegeben" : "idee" })}>Zurücksetzen</button>
+          )}
+          {post.exportedAt && post.status !== "gepostet" && (
+            <button className={btnCls} onClick={() => onUpdate({ exportedAt: "" })}>Erneut exportieren</button>
           )}
           <button className={btnCls + " ml-auto text-red-300"} onClick={onDelete}>Löschen</button>
         </div>
@@ -403,6 +412,23 @@ export default function InfluencerManagerStudio({
     setView("plan");
   };
 
+  const exportToBuffer = (platform) => {
+    const { ready, skipped } = bufferExportFor(state, profile.id, platform);
+    if (skipped.length) {
+      toast.error(`${skipped.length} Posts übersprungen: Bild fehlt oder der Link endet nicht auf .jpg/.png/.webp.`);
+    }
+    if (ready.length === 0) {
+      toast("Keine neuen freigegebenen Posts mit Bild für diesen Kanal.");
+      return;
+    }
+    const handle = profile.handle.replace(/[^A-Za-z0-9._-]/g, "") || "profil";
+    downloadText(`buffer_${handle}_${platform}_${new Date().toISOString().slice(0, 10)}.csv`, buildBufferCsv(ready), "text/csv;charset=utf-8");
+    const ids = new Set(ready.map((p) => p.id));
+    const exportedAt = new Date().toISOString();
+    setState((s) => ({ ...s, posts: s.posts.map((p) => (ids.has(p.id) ? { ...p, exportedAt } : p)) }));
+    toast.success(`${ready.length} ${ready.length === 1 ? "Post" : "Posts"} für ${PLATFORMS[platform].label} exportiert. Jetzt in Buffer beim Kanal von ${profile.handle} hochladen.`);
+  };
+
   const refreshPrompts = () => {
     setState((s) => ({
       ...s,
@@ -449,6 +475,11 @@ export default function InfluencerManagerStudio({
     const tick = async () => {
       const current = stateRef.current;
       const cfg = sanitizeSettings(current.settings);
+      const published = markPublishedExports(current);
+      if (published.changed) {
+        setState((s) => markPublishedExports(s).state);
+        toast(`${published.changed} Posts wurden von Buffer veröffentlicht – trag die Reichweite ein.`);
+      }
       let added = [];
       if (cfg.autoPlan) {
         const plan = ensurePlanned(current);
@@ -560,6 +591,18 @@ export default function InfluencerManagerStudio({
                   {POST_STATUS.map((s) => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}
                 </select>
               </div>
+              <div className="flex flex-wrap items-center gap-2 rounded-xl border border-white/[0.07] bg-[#121212] px-3 py-2">
+                <span className="text-[11px] font-semibold text-gray-400">Für Buffer exportieren:</span>
+                {profile.platforms.map((pl) => {
+                  const n = bufferExportFor(state, profile.id, pl).ready.length;
+                  return (
+                    <button key={pl} className={btnCls} disabled={n === 0} onClick={() => exportToBuffer(pl)}>
+                      {PLATFORMS[pl]?.label || pl} ({n})
+                    </button>
+                  );
+                })}
+                <span className="text-[10px] text-gray-600 w-full">Nur freigegebene Posts mit Bild. Danach in Buffer: Kanal öffnen → Bulk Upload → Datei hochladen.</span>
+              </div>
               {!profile.avatarUrl && (
                 <p className="text-[11px] text-amber-300/80">Tipp: Erst im Tab „Profil“ ein Referenzbild erzeugen – dann sieht {profile.name} in jedem Post gleich aus.</p>
               )}
@@ -657,7 +700,8 @@ export default function InfluencerManagerStudio({
 
               <p className="text-[11px] text-gray-600 leading-relaxed">
                 Die Automatik läuft, solange die App in einem Browser-Tab offen ist. Ist sie zu, holt sie beim nächsten Öffnen alles nach.
-                Veröffentlicht wird nichts automatisch: Exportiere freigegebene Posts per „Plan als CSV“ in ein Planungs-Tool, das sie zur geplanten Zeit postet.
+                Veröffentlicht wird über Buffer: Im Content-Plan freigegebene Posts mit „Für Buffer exportieren“ herunterladen und in Buffer hochladen.
+                Sobald die geplante Zeit vorbei ist, setzt die App diese Posts automatisch auf „Gepostet“, damit du die Reichweite eintragen kannst.
               </p>
             </div>
           )}

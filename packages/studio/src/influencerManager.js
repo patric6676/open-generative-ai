@@ -109,6 +109,7 @@ export function sanitizePost(raw, profileIds) {
     scheduledAt,
     status: POST_STATUS.includes(p.status) ? p.status : "idee",
     imageUrl: safeImageUrl(p.imageUrl),
+    exportedAt: cleanDate(p.exportedAt) || "",
     prompt: cleanText(p.prompt, MAX_TEXT.long),
     caption: cleanText(p.caption, MAX_TEXT.long),
     metrics: m ? Object.fromEntries(["reach", "likes", "comments", "shares", "saves"]
@@ -525,4 +526,62 @@ export function pickAutoImageQueue(state, now = new Date(), withinDays = 2) {
     .filter((p) => p.status === "idee" && !p.imageUrl && new Date(p.scheduledAt) <= limit && new Date(p.scheduledAt) >= now)
     .sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt))
     .slice(0, remaining);
+}
+
+// ── Buffer bulk upload ──────────────────────────────────────────────────────
+// Format per Buffer's help centre: one CSV per channel with the exact,
+// case-sensitive headers "Text", "Image URL", "Tags", "Posting Time"
+// (YYYY-MM-DD HH:mm). Instagram posts need a direct image link.
+
+const IMAGE_EXT = /\.(jpe?g|png|gif|webp)$/i;
+
+export function isDirectImageUrl(url) {
+  const safe = safeImageUrl(url);
+  if (!safe) return false;
+  return IMAGE_EXT.test(new URL(safe).pathname);
+}
+
+function formatPostingTime(iso) {
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// Approved, not yet exported, future posts for one profile + platform.
+// Returns the rows that can go to Buffer and the posts that had to be skipped.
+export function bufferExportFor(state, profileId, platform, now = new Date()) {
+  const candidates = state.posts
+    .filter((p) => p.profileId === profileId && p.platform === platform && p.status === "freigegeben"
+      && !p.exportedAt && new Date(p.scheduledAt) > now)
+    .sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt));
+  const ready = [];
+  const skipped = [];
+  for (const post of candidates) {
+    if (!isDirectImageUrl(post.imageUrl)) skipped.push(post);
+    else ready.push(post);
+  }
+  return { ready: ready.slice(0, 100), skipped }; // Buffer queues max 100 posts per channel
+}
+
+export function buildBufferCsv(posts) {
+  const rows = [["Text", "Image URL", "Tags", "Posting Time"]];
+  for (const post of posts) {
+    rows.push([post.caption, safeImageUrl(post.imageUrl), "", formatPostingTime(post.scheduledAt)]);
+  }
+  // Leading BOM so Excel and Buffer read emoji as UTF-8.
+  return "\uFEFF" + rows.map((r) => r.map(csvCell).join(",")).join("\r\n");
+}
+
+// Exported posts are published by Buffer, so once their time has passed
+// they count as posted and ask for metrics.
+export function markPublishedExports(state, now = new Date()) {
+  let changed = 0;
+  const posts = state.posts.map((p) => {
+    if (p.exportedAt && p.status === "freigegeben" && new Date(p.scheduledAt) <= now) {
+      changed += 1;
+      return { ...p, status: "gepostet" };
+    }
+    return p;
+  });
+  return { state: changed ? { ...state, posts } : state, changed };
 }
