@@ -10,6 +10,9 @@ import {
   PLATFORMS,
   FORMATS,
   POST_STATUS,
+  TONES,
+  MAX_IMPORT_BYTES,
+  safeImageUrl,
   createDefaultState,
   parseState,
   planWeek,
@@ -99,8 +102,8 @@ function ProfileTab({ profile, onChange, onGenerateAvatar, busy }) {
     <div className="grid grid-cols-1 lg:grid-cols-[240px_1fr] gap-6">
       <div className="space-y-3">
         <div className="aspect-[3/4] rounded-2xl overflow-hidden border border-white/[0.08] bg-[#141414] flex items-center justify-center">
-          {profile.avatarUrl ? (
-            <img src={profile.avatarUrl} alt={profile.name} className="w-full h-full object-cover" />
+          {safeImageUrl(profile.avatarUrl) ? (
+            <img src={safeImageUrl(profile.avatarUrl)} alt={profile.name} referrerPolicy="no-referrer" className="w-full h-full object-cover" />
           ) : (
             <p className="text-[11px] text-gray-600 text-center px-6">Noch kein Referenzbild. Es sorgt dafür, dass das Gesicht in allen Posts gleich bleibt.</p>
           )}
@@ -108,9 +111,12 @@ function ProfileTab({ profile, onChange, onGenerateAvatar, busy }) {
         <button className={primaryBtnCls + " w-full"} disabled={busy} onClick={onGenerateAvatar}>
           {busy ? "Generiere…" : profile.avatarUrl ? "Neues Referenzbild" : "Referenzbild generieren"}
         </button>
-        <Field label="Oder Bild-URL einfügen">
-          <input className={inputCls} value={profile.avatarUrl} onChange={set("avatarUrl")} placeholder="https://…" />
+        <Field label="Oder Bild-URL einfügen (nur https)">
+          <input className={inputCls} value={profile.avatarUrl} onChange={set("avatarUrl")} placeholder="https://…" maxLength={2048} />
         </Field>
+        {profile.avatarUrl && !safeImageUrl(profile.avatarUrl) && (
+          <p className="text-[11px] text-red-300">Nur https-Bildlinks werden verwendet.</p>
+        )}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 content-start">
@@ -119,7 +125,7 @@ function ProfileTab({ profile, onChange, onGenerateAvatar, busy }) {
         <Field label="Nische"><input className={inputCls} value={profile.niche} onChange={set("niche")} /></Field>
         <Field label="Tonalität">
           <select className={inputCls} value={profile.tone} onChange={set("tone")}>
-            {["motivierend", "neugierig", "witzig", "herzlich", "selbstbewusst"].map((t) => <option key={t} value={t}>{t}</option>)}
+            {TONES.map((t) => <option key={t} value={t}>{t}</option>)}
           </select>
         </Field>
         <div className="md:col-span-2">
@@ -168,8 +174,8 @@ function PostCard({ post, profile, busy, onUpdate, onGenerate, onDelete }) {
         <div className="aspect-[4/5] rounded-lg overflow-hidden bg-[#1a1a1a] border border-white/[0.06] flex items-center justify-center">
           {busy ? (
             <div className="w-6 h-6 border-2 border-violet-500/20 border-t-violet-500 rounded-full animate-spin" />
-          ) : post.imageUrl ? (
-            <img src={post.imageUrl} alt={post.pillar} className="w-full h-full object-cover" />
+          ) : safeImageUrl(post.imageUrl) ? (
+            <img src={safeImageUrl(post.imageUrl)} alt={post.pillar} referrerPolicy="no-referrer" className="w-full h-full object-cover" />
           ) : (
             <span className="text-[10px] text-gray-600">kein Bild</span>
           )}
@@ -177,8 +183,8 @@ function PostCard({ post, profile, busy, onUpdate, onGenerate, onDelete }) {
         <button className={btnCls + " w-full mt-2"} disabled={busy} onClick={onGenerate}>
           {post.imageUrl ? "Neu" : "Bild"} generieren
         </button>
-        {post.imageUrl && (
-          <button className={btnCls + " w-full mt-1"} onClick={() => downloadImage(post.imageUrl, `${profile.handle.replace("@", "")}_${post.id}.png`)}>
+        {safeImageUrl(post.imageUrl) && (
+          <button className={btnCls + " w-full mt-1"} onClick={() => downloadImage(safeImageUrl(post.imageUrl), `${profile.handle.replace(/[^A-Za-z0-9._-]/g, "") || "post"}_${post.id}.png`)}>
             Download
           </button>
         )}
@@ -310,9 +316,10 @@ export default function InfluencerManagerStudio({
     onGenerationStart?.();
     try {
       const res = await fn();
-      if (!res?.url) throw new Error("Keine Bild-URL in der Antwort.");
-      onGenerationComplete?.({ url: res.url });
-      return res.url;
+      const url = safeImageUrl(res?.url);
+      if (!url) throw new Error("Keine gültige https-Bild-URL in der Antwort.");
+      onGenerationComplete?.({ url });
+      return url;
     } catch (err) {
       const message = formatErrorMessage(err);
       toast.error(message);
@@ -341,10 +348,11 @@ export default function InfluencerManagerStudio({
     if (!requireKey()) return;
     const owner = state.profiles.find((p) => p.id === post.profileId);
     const aspect_ratio = post.format === "Reel" || post.format === "Story" ? "9:16" : PLATFORMS[post.platform]?.aspectRatio || "4:5";
-    const url = await runGeneration(post.id, () => (owner?.avatarUrl
+    const reference = safeImageUrl(owner?.avatarUrl);
+    const url = await runGeneration(post.id, () => (reference
       ? generateI2I(apiKey, {
           model: EDIT_MODEL,
-          images_list: [owner.avatarUrl],
+          images_list: [reference],
           prompt: `Same person as in the reference image, identical face. ${post.prompt}`,
           aspect_ratio,
         })
@@ -395,8 +403,13 @@ export default function InfluencerManagerStudio({
   };
 
   const importBackup = async (file) => {
+    if (file.size > MAX_IMPORT_BYTES) {
+      toast.error("Backup ist größer als 5 MB und wurde nicht importiert.");
+      return;
+    }
     try {
       const text = await file.text();
+      JSON.parse(text); // reject non-JSON instead of silently resetting to defaults
       const parsed = parseState(text);
       setState(parsed);
       setActiveId(parsed.profiles[0]?.id);
@@ -427,7 +440,7 @@ export default function InfluencerManagerStudio({
                   p.id === profile.id ? "bg-violet-600/20 border border-violet-500/40" : "border border-transparent hover:bg-white/[0.04]"
                 }`}>
                 <div className="w-10 h-10 rounded-full overflow-hidden bg-[#1c1c1c] shrink-0 flex items-center justify-center text-[13px] font-bold text-gray-500">
-                  {p.avatarUrl ? <img src={p.avatarUrl} alt="" className="w-full h-full object-cover" /> : p.name.slice(0, 1)}
+                  {safeImageUrl(p.avatarUrl) ? <img src={safeImageUrl(p.avatarUrl)} alt="" referrerPolicy="no-referrer" className="w-full h-full object-cover" /> : p.name.slice(0, 1)}
                 </div>
                 <div className="min-w-0">
                   <p className="text-[12px] font-semibold truncate">{p.name}</p>
