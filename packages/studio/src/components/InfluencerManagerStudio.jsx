@@ -1,0 +1,583 @@
+"use client";
+
+import { useState, useEffect, useMemo, useRef } from "react";
+import toast, { Toaster } from "react-hot-toast";
+import { generateImage, generateI2I } from "../muapi.js";
+import { formatErrorMessage } from "../utils/formatError.js";
+import { downloadImage } from "../utils/downloadImage.js";
+import {
+  STORAGE_KEY,
+  PLATFORMS,
+  FORMATS,
+  POST_STATUS,
+  createDefaultState,
+  parseState,
+  planWeek,
+  computeInsights,
+  buildCaption,
+  buildImagePrompt,
+  engagementRate,
+  exportScheduleCsv,
+} from "../influencerManager.js";
+
+const T2I_MODEL = "nano-banana-pro";
+const EDIT_MODEL = "nano-banana-pro-edit";
+
+const STATUS_LABEL = { idee: "Idee", bild: "Bild fertig", freigegeben: "Freigegeben", gepostet: "Gepostet" };
+const STATUS_STYLE = {
+  idee: "bg-white/5 text-gray-400",
+  bild: "bg-sky-500/15 text-sky-300",
+  freigegeben: "bg-amber-500/15 text-amber-300",
+  gepostet: "bg-emerald-500/15 text-emerald-300",
+};
+
+const inputCls = "w-full bg-[#161616] border border-white/[0.08] rounded-lg px-3 py-2 text-[12px] text-gray-200 placeholder-gray-600 outline-none focus:border-violet-500/50";
+const btnCls = "px-3 py-1.5 rounded-lg text-[12px] font-semibold border border-white/10 bg-white/[0.04] hover:bg-white/[0.09] text-gray-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors";
+const primaryBtnCls = "px-4 py-2 rounded-lg text-[12px] font-bold bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white disabled:opacity-40 disabled:cursor-not-allowed";
+
+function loadState() {
+  if (typeof window === "undefined") return createDefaultState();
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    return raw ? parseState(raw) : createDefaultState();
+  } catch {
+    return createDefaultState();
+  }
+}
+
+function downloadText(filename, text, type) {
+  const blob = new Blob([text], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function toLocalInput(iso) {
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function formatNumber(n) {
+  return new Intl.NumberFormat("de-DE").format(Math.round(n || 0));
+}
+
+function Field({ label, children }) {
+  return (
+    <label className="block">
+      <span className="block text-[10px] uppercase tracking-wider text-gray-500 font-bold mb-1">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function Kpi({ label, value, hint }) {
+  return (
+    <div className="rounded-xl border border-white/[0.07] bg-[#121212] p-4">
+      <p className="text-[10px] uppercase tracking-wider text-gray-500 font-bold">{label}</p>
+      <p className="text-xl font-bold text-white mt-1">{value}</p>
+      {hint && <p className="text-[11px] text-gray-500 mt-0.5">{hint}</p>}
+    </div>
+  );
+}
+
+// ─── Profile editor ─────────────────────────────────────────────────────────
+function ProfileTab({ profile, onChange, onGenerateAvatar, busy }) {
+  const set = (key) => (e) => onChange({ [key]: e.target.value });
+  const setList = (key) => (e) => onChange({ [key]: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) });
+  const togglePlatform = (id) => {
+    const has = profile.platforms.includes(id);
+    onChange({ platforms: has ? profile.platforms.filter((p) => p !== id) : [...profile.platforms, id] });
+  };
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-[240px_1fr] gap-6">
+      <div className="space-y-3">
+        <div className="aspect-[3/4] rounded-2xl overflow-hidden border border-white/[0.08] bg-[#141414] flex items-center justify-center">
+          {profile.avatarUrl ? (
+            <img src={profile.avatarUrl} alt={profile.name} className="w-full h-full object-cover" />
+          ) : (
+            <p className="text-[11px] text-gray-600 text-center px-6">Noch kein Referenzbild. Es sorgt dafür, dass das Gesicht in allen Posts gleich bleibt.</p>
+          )}
+        </div>
+        <button className={primaryBtnCls + " w-full"} disabled={busy} onClick={onGenerateAvatar}>
+          {busy ? "Generiere…" : profile.avatarUrl ? "Neues Referenzbild" : "Referenzbild generieren"}
+        </button>
+        <Field label="Oder Bild-URL einfügen">
+          <input className={inputCls} value={profile.avatarUrl} onChange={set("avatarUrl")} placeholder="https://…" />
+        </Field>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 content-start">
+        <Field label="Name"><input className={inputCls} value={profile.name} onChange={set("name")} /></Field>
+        <Field label="Handle"><input className={inputCls} value={profile.handle} onChange={set("handle")} /></Field>
+        <Field label="Nische"><input className={inputCls} value={profile.niche} onChange={set("niche")} /></Field>
+        <Field label="Tonalität">
+          <select className={inputCls} value={profile.tone} onChange={set("tone")}>
+            {["motivierend", "neugierig", "witzig", "herzlich", "selbstbewusst"].map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </Field>
+        <div className="md:col-span-2">
+          <Field label="Aussehen (englisch, für den Bild-Prompt)">
+            <textarea className={inputCls + " h-20 resize-none"} value={profile.appearance} onChange={set("appearance")} />
+          </Field>
+        </div>
+        <div className="md:col-span-2">
+          <Field label="Zielgruppe"><input className={inputCls} value={profile.audience} onChange={set("audience")} /></Field>
+        </div>
+        <Field label="Content-Säulen (Komma-getrennt)">
+          <input className={inputCls} value={profile.pillars.join(", ")} onChange={setList("pillars")} />
+        </Field>
+        <Field label="Hashtags (Komma-getrennt)">
+          <input className={inputCls} value={profile.hashtags.join(", ")} onChange={setList("hashtags")} />
+        </Field>
+        <Field label="Posts pro Woche">
+          <input type="number" min={1} max={14} className={inputCls} value={profile.postsPerWeek}
+            onChange={(e) => onChange({ postsPerWeek: Math.max(1, Math.min(14, Number(e.target.value) || 1)) })} />
+        </Field>
+        <Field label="Plattformen">
+          <div className="flex flex-wrap gap-1.5">
+            {Object.entries(PLATFORMS).map(([id, p]) => (
+              <button key={id} type="button" onClick={() => togglePlatform(id)}
+                className={`px-2.5 py-1 rounded-md text-[11px] font-semibold border transition-colors ${
+                  profile.platforms.includes(id) ? "bg-violet-600/30 border-violet-500/50 text-white" : "bg-white/[0.03] border-white/10 text-gray-500"
+                }`}>
+                {p.label}
+              </button>
+            ))}
+          </div>
+        </Field>
+      </div>
+    </div>
+  );
+}
+
+// ─── Single post card ───────────────────────────────────────────────────────
+function PostCard({ post, profile, busy, onUpdate, onGenerate, onDelete }) {
+  const setMetric = (key) => (e) => onUpdate({ metrics: { ...(post.metrics || {}), [key]: Number(e.target.value) || 0 } });
+  const er = engagementRate(post.metrics);
+
+  return (
+    <div className="rounded-xl border border-white/[0.07] bg-[#121212] p-3 flex gap-3">
+      <div className="w-28 shrink-0">
+        <div className="aspect-[4/5] rounded-lg overflow-hidden bg-[#1a1a1a] border border-white/[0.06] flex items-center justify-center">
+          {busy ? (
+            <div className="w-6 h-6 border-2 border-violet-500/20 border-t-violet-500 rounded-full animate-spin" />
+          ) : post.imageUrl ? (
+            <img src={post.imageUrl} alt={post.pillar} className="w-full h-full object-cover" />
+          ) : (
+            <span className="text-[10px] text-gray-600">kein Bild</span>
+          )}
+        </div>
+        <button className={btnCls + " w-full mt-2"} disabled={busy} onClick={onGenerate}>
+          {post.imageUrl ? "Neu" : "Bild"} generieren
+        </button>
+        {post.imageUrl && (
+          <button className={btnCls + " w-full mt-1"} onClick={() => downloadImage(post.imageUrl, `${profile.handle.replace("@", "")}_${post.id}.png`)}>
+            Download
+          </button>
+        )}
+      </div>
+
+      <div className="flex-1 min-w-0 space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${STATUS_STYLE[post.status]}`}>{STATUS_LABEL[post.status]}</span>
+          <select className="bg-transparent text-[11px] text-gray-300 outline-none" value={post.platform}
+            onChange={(e) => onUpdate({ platform: e.target.value })}>
+            {Object.entries(PLATFORMS).map(([id, p]) => <option key={id} value={id}>{p.label}</option>)}
+          </select>
+          <select className="bg-transparent text-[11px] text-gray-300 outline-none" value={post.format}
+            onChange={(e) => onUpdate({ format: e.target.value })}>
+            {FORMATS.map((f) => <option key={f} value={f}>{f}</option>)}
+          </select>
+          <span className="text-[11px] text-violet-300 font-semibold">{post.pillar}</span>
+          <input type="datetime-local" className="ml-auto bg-transparent text-[11px] text-gray-400 outline-none"
+            value={toLocalInput(post.scheduledAt)}
+            onChange={(e) => e.target.value && onUpdate({ scheduledAt: new Date(e.target.value).toISOString() })} />
+        </div>
+
+        <textarea className={inputCls + " h-28 resize-y font-mono text-[11px]"} value={post.caption}
+          onChange={(e) => onUpdate({ caption: e.target.value })} />
+
+        <details className="text-[11px] text-gray-500">
+          <summary className="cursor-pointer select-none">Bild-Prompt</summary>
+          <textarea className={inputCls + " h-16 mt-1 resize-y text-[11px]"} value={post.prompt}
+            onChange={(e) => onUpdate({ prompt: e.target.value })} />
+        </details>
+
+        {post.status === "gepostet" && (
+          <div className="grid grid-cols-5 gap-1.5">
+            {["reach", "likes", "comments", "shares", "saves"].map((k) => (
+              <label key={k} className="block">
+                <span className="block text-[9px] uppercase text-gray-600 font-bold">
+                  {{ reach: "Reichweite", likes: "Likes", comments: "Kommentare", shares: "Shares", saves: "Saves" }[k]}
+                </span>
+                <input type="number" min={0} className={inputCls + " py-1"} value={post.metrics?.[k] ?? ""} onChange={setMetric(k)} />
+              </label>
+            ))}
+            <p className="col-span-5 text-[11px] text-gray-500">Engagement: <span className="text-white font-semibold">{(er * 100).toFixed(1)} %</span></p>
+          </div>
+        )}
+
+        <div className="flex flex-wrap gap-1.5">
+          <button className={btnCls} onClick={() => { navigator.clipboard?.writeText(post.caption); toast.success("Caption kopiert"); }}>Caption kopieren</button>
+          <button className={btnCls} onClick={() => onUpdate({ caption: buildCaption(profile, post) })}>Neue Caption</button>
+          {post.status !== "freigegeben" && post.status !== "gepostet" && (
+            <button className={btnCls} disabled={!post.imageUrl} onClick={() => onUpdate({ status: "freigegeben" })}>Freigeben</button>
+          )}
+          {post.status !== "gepostet" ? (
+            <button className={btnCls} onClick={() => onUpdate({ status: "gepostet" })}>Als gepostet markieren</button>
+          ) : (
+            <button className={btnCls} onClick={() => onUpdate({ status: post.imageUrl ? "freigegeben" : "idee" })}>Zurücksetzen</button>
+          )}
+          <button className={btnCls + " ml-auto text-red-300"} onClick={onDelete}>Löschen</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Main component ─────────────────────────────────────────────────────────
+export default function InfluencerManagerStudio({
+  apiKey,
+  onGenerationStart,
+  onGenerationEnd,
+  onGenerationComplete,
+  onGenerationError,
+}) {
+  const [state, setState] = useState(createDefaultState);
+  const [loaded, setLoaded] = useState(false);
+  const [activeId, setActiveId] = useState("profile_1");
+  const [view, setView] = useState("plan");
+  const [busyIds, setBusyIds] = useState({});
+  const [statusFilter, setStatusFilter] = useState("offen");
+  const [followerInput, setFollowerInput] = useState("");
+  const importRef = useRef(null);
+
+  // Load after mount so SSR markup matches the first client render.
+  useEffect(() => {
+    setState(loadState());
+    setLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    try { window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch { /* storage full or blocked */ }
+  }, [state, loaded]);
+
+  const profile = state.profiles.find((p) => p.id === activeId) || state.profiles[0];
+  const insightsById = useMemo(
+    () => Object.fromEntries(state.profiles.map((p) => [p.id, computeInsights(p, state.posts)])),
+    [state],
+  );
+  const insights = insightsById[profile.id];
+
+  const profilePosts = useMemo(() => {
+    const mine = state.posts.filter((p) => p.profileId === profile.id);
+    const filtered = statusFilter === "alle" ? mine
+      : statusFilter === "offen" ? mine.filter((p) => p.status !== "gepostet")
+      : mine.filter((p) => p.status === statusFilter);
+    return filtered.sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt));
+  }, [state.posts, profile.id, statusFilter]);
+
+  const updateProfile = (patch) =>
+    setState((s) => ({ ...s, profiles: s.profiles.map((p) => (p.id === profile.id ? { ...p, ...patch } : p)) }));
+
+  const updatePost = (id, patch) =>
+    setState((s) => ({ ...s, posts: s.posts.map((p) => (p.id === id ? { ...p, ...patch } : p)) }));
+
+  const deletePost = (id) => setState((s) => ({ ...s, posts: s.posts.filter((p) => p.id !== id) }));
+
+  const setBusy = (id, value) => setBusyIds((b) => {
+    const next = { ...b };
+    if (value) next[id] = true; else delete next[id];
+    return next;
+  });
+
+  const requireKey = () => {
+    if (apiKey) return true;
+    toast.error("Bitte zuerst einen MuAPI-Key hinterlegen.");
+    return false;
+  };
+
+  const runGeneration = async (busyId, fn) => {
+    setBusy(busyId, true);
+    onGenerationStart?.();
+    try {
+      const res = await fn();
+      if (!res?.url) throw new Error("Keine Bild-URL in der Antwort.");
+      onGenerationComplete?.({ url: res.url });
+      return res.url;
+    } catch (err) {
+      const message = formatErrorMessage(err);
+      toast.error(message);
+      onGenerationError?.(message);
+      return null;
+    } finally {
+      setBusy(busyId, false);
+      onGenerationEnd?.();
+    }
+  };
+
+  const generateAvatar = async (target = profile) => {
+    if (!requireKey()) return;
+    const url = await runGeneration(`avatar_${target.id}`, () => generateImage(apiKey, {
+      model: T2I_MODEL,
+      prompt: `Ultra-realistic portrait photo of ${target.appearance}, neutral background, soft studio light, looking at camera, sharp facial detail`,
+      aspect_ratio: "3:4",
+    }));
+    if (url) {
+      setState((s) => ({ ...s, profiles: s.profiles.map((p) => (p.id === target.id ? { ...p, avatarUrl: url } : p)) }));
+    }
+  };
+
+  // With a reference avatar, use the edit model so the face stays consistent.
+  const generatePostImage = async (post) => {
+    if (!requireKey()) return;
+    const owner = state.profiles.find((p) => p.id === post.profileId);
+    const aspect_ratio = post.format === "Reel" || post.format === "Story" ? "9:16" : PLATFORMS[post.platform]?.aspectRatio || "4:5";
+    const url = await runGeneration(post.id, () => (owner?.avatarUrl
+      ? generateI2I(apiKey, {
+          model: EDIT_MODEL,
+          images_list: [owner.avatarUrl],
+          prompt: `Same person as in the reference image, identical face. ${post.prompt}`,
+          aspect_ratio,
+        })
+      : generateImage(apiKey, { model: T2I_MODEL, prompt: post.prompt, aspect_ratio })));
+    if (url) updatePost(post.id, { imageUrl: url, status: post.status === "idee" ? "bild" : post.status });
+  };
+
+  const generateAllOpen = async (profileIds) => {
+    if (!requireKey()) return;
+    const queue = state.posts.filter((p) => profileIds.includes(p.profileId) && !p.imageUrl && p.status !== "gepostet");
+    if (queue.length === 0) { toast("Keine offenen Posts ohne Bild."); return; }
+    toast(`${queue.length} Bilder werden generiert…`);
+    // Sequential on purpose: keeps credit usage predictable and avoids rate limits.
+    for (const post of queue) {
+      // eslint-disable-next-line no-await-in-loop
+      await generatePostImage(post);
+    }
+  };
+
+  const createWeekPlan = (profileIds) => {
+    const start = new Date();
+    start.setDate(start.getDate() + 1);
+    setState((s) => {
+      const newPosts = s.profiles
+        .filter((p) => profileIds.includes(p.id))
+        .flatMap((p) => planWeek(p, start, computeInsights(p, s.posts)));
+      return { ...s, posts: [...s.posts, ...newPosts] };
+    });
+    toast.success(profileIds.length > 1 ? "Wochenplan für alle 5 Profile erstellt" : "Wochenplan erstellt");
+    setView("plan");
+  };
+
+  const refreshPrompts = () => {
+    setState((s) => ({
+      ...s,
+      posts: s.posts.map((p) => (p.profileId === profile.id && p.status === "idee" ? { ...p, prompt: buildImagePrompt(profile, p) } : p)),
+    }));
+    toast.success("Prompts der offenen Ideen aktualisiert");
+  };
+
+  const logFollowers = () => {
+    const count = Number(followerInput);
+    if (!Number.isFinite(count) || count < 0) return;
+    const date = new Date().toISOString().slice(0, 10);
+    const others = (profile.followers || []).filter((f) => f.date !== date);
+    updateProfile({ followers: [...others, { date, count }] });
+    setFollowerInput("");
+  };
+
+  const importBackup = async (file) => {
+    try {
+      const text = await file.text();
+      const parsed = parseState(text);
+      setState(parsed);
+      setActiveId(parsed.profiles[0]?.id);
+      toast.success("Backup importiert");
+    } catch {
+      toast.error("Backup konnte nicht gelesen werden");
+    }
+  };
+
+  const allIds = state.profiles.map((p) => p.id);
+  const dueToday = state.posts.filter((p) => p.status === "freigegeben" && new Date(p.scheduledAt) <= new Date());
+
+  return (
+    <div className="h-full w-full flex bg-[#0b0b0b] text-white overflow-hidden">
+      {/* Profiles sidebar */}
+      <aside className="w-[220px] shrink-0 border-r border-white/[0.07] bg-[#101010] flex flex-col">
+        <div className="px-4 py-4 border-b border-white/[0.07]">
+          <p className="text-[13px] font-bold">Influencer Manager</p>
+          <p className="text-[10px] text-gray-500 mt-0.5">5 KI-Profile · Plan · Reichweite</p>
+        </div>
+        <div className="flex-1 overflow-y-auto p-2 space-y-1">
+          {state.profiles.map((p) => {
+            const ins = insightsById[p.id];
+            const open = state.posts.filter((x) => x.profileId === p.id && x.status !== "gepostet").length;
+            return (
+              <button key={p.id} type="button" onClick={() => setActiveId(p.id)}
+                className={`w-full flex items-center gap-2.5 p-2 rounded-xl text-left transition-colors ${
+                  p.id === profile.id ? "bg-violet-600/20 border border-violet-500/40" : "border border-transparent hover:bg-white/[0.04]"
+                }`}>
+                <div className="w-10 h-10 rounded-full overflow-hidden bg-[#1c1c1c] shrink-0 flex items-center justify-center text-[13px] font-bold text-gray-500">
+                  {p.avatarUrl ? <img src={p.avatarUrl} alt="" className="w-full h-full object-cover" /> : p.name.slice(0, 1)}
+                </div>
+                <div className="min-w-0">
+                  <p className="text-[12px] font-semibold truncate">{p.name}</p>
+                  <p className="text-[10px] text-gray-500 truncate">{p.handle}</p>
+                  <p className="text-[10px] text-gray-600">{formatNumber(ins.followersLatest)} Follower · {open} geplant</p>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+        <div className="p-3 border-t border-white/[0.07] space-y-1.5">
+          <button className={primaryBtnCls + " w-full"} onClick={() => createWeekPlan(allIds)}>Wochenplan für alle</button>
+          <button className={btnCls + " w-full"} disabled={Object.keys(busyIds).length > 0} onClick={() => generateAllOpen(allIds)}>Alle Bilder generieren</button>
+          <button className={btnCls + " w-full"} onClick={() => downloadText(`content-plan_${new Date().toISOString().slice(0, 10)}.csv`, exportScheduleCsv(state), "text/csv;charset=utf-8")}>Plan als CSV</button>
+          <div className="flex gap-1.5">
+            <button className={btnCls + " flex-1"} onClick={() => downloadText("influencer-backup.json", JSON.stringify(state, null, 2), "application/json")}>Backup</button>
+            <button className={btnCls + " flex-1"} onClick={() => importRef.current?.click()}>Import</button>
+            <input ref={importRef} type="file" accept="application/json" className="hidden"
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) importBackup(f); e.target.value = ""; }} />
+          </div>
+        </div>
+      </aside>
+
+      {/* Main */}
+      <main className="flex-1 min-w-0 flex flex-col">
+        <div className="flex items-center gap-1 px-6 pt-4 pb-3 border-b border-white/[0.07] shrink-0">
+          {[["plan", "Content-Plan"], ["profil", "Profil"], ["analytics", "Reichweite"], ["overview", "Übersicht"]].map(([id, label]) => (
+            <button key={id} type="button" onClick={() => setView(id)}
+              className={`px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-colors ${view === id ? "bg-white/10 text-white" : "text-gray-500 hover:text-gray-300"}`}>
+              {label}
+            </button>
+          ))}
+          {dueToday.length > 0 && (
+            <span className="ml-auto text-[11px] text-amber-300 font-semibold">{dueToday.length} freigegebene Posts sind fällig</span>
+          )}
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-6">
+          {view === "profil" && (
+            <ProfileTab profile={profile} onChange={updateProfile} busy={!!busyIds[`avatar_${profile.id}`]} onGenerateAvatar={() => generateAvatar(profile)} />
+          )}
+
+          {view === "plan" && (
+            <div className="space-y-3 max-w-4xl">
+              <div className="flex flex-wrap items-center gap-2">
+                <button className={primaryBtnCls} onClick={() => createWeekPlan([profile.id])}>+ Wochenplan für {profile.name}</button>
+                <button className={btnCls} disabled={Object.keys(busyIds).length > 0} onClick={() => generateAllOpen([profile.id])}>Offene Bilder generieren</button>
+                <button className={btnCls} onClick={refreshPrompts}>Prompts aus Profil erneuern</button>
+                <select className="ml-auto bg-[#161616] border border-white/[0.08] rounded-lg px-3 py-2 text-[12px] text-gray-200 outline-none" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+                  <option value="offen">Offen</option>
+                  <option value="alle">Alle</option>
+                  {POST_STATUS.map((s) => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}
+                </select>
+              </div>
+              {!profile.avatarUrl && (
+                <p className="text-[11px] text-amber-300/80">Tipp: Erst im Tab „Profil“ ein Referenzbild erzeugen – dann sieht {profile.name} in jedem Post gleich aus.</p>
+              )}
+              {profilePosts.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-white/10 p-10 text-center text-[12px] text-gray-500">
+                  Keine Posts in dieser Ansicht. Erstelle einen Wochenplan.
+                </div>
+              ) : profilePosts.map((post) => (
+                <PostCard key={post.id} post={post} profile={profile} busy={!!busyIds[post.id]}
+                  onUpdate={(patch) => updatePost(post.id, patch)}
+                  onGenerate={() => generatePostImage(post)}
+                  onDelete={() => deletePost(post.id)} />
+              ))}
+            </div>
+          )}
+
+          {view === "analytics" && (
+            <div className="space-y-5 max-w-4xl">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <Kpi label="Follower" value={formatNumber(insights.followersLatest)} hint={`${insights.followerGrowth >= 0 ? "+" : ""}${formatNumber(insights.followerGrowth)} seit Start`} />
+                <Kpi label="Reichweite gesamt" value={formatNumber(insights.totalReach)} hint={`${insights.postedCount} Posts erfasst`} />
+                <Kpi label="Ø Engagement" value={`${(insights.avgEngagement * 100).toFixed(1)} %`} />
+                <Kpi label="Top-Säule" value={insights.topPillar || "–"} />
+              </div>
+
+              <div className="rounded-xl border border-white/[0.07] bg-[#121212] p-4">
+                <p className="text-[12px] font-bold mb-2">Follower-Stand eintragen</p>
+                <div className="flex gap-2">
+                  <input type="number" min={0} className={inputCls + " max-w-[180px]"} value={followerInput}
+                    onChange={(e) => setFollowerInput(e.target.value)} placeholder="z. B. 1250" />
+                  <button className={btnCls} onClick={logFollowers}>Speichern (heute)</button>
+                </div>
+                {profile.followers?.length > 0 && (
+                  <div className="flex items-end gap-1 h-24 mt-4">
+                    {[...profile.followers].sort((a, b) => a.date.localeCompare(b.date)).slice(-30).map((f) => {
+                      const max = Math.max(...profile.followers.map((x) => x.count), 1);
+                      return (
+                        <div key={f.date} title={`${f.date}: ${formatNumber(f.count)}`} className="flex-1 bg-violet-500/60 rounded-t min-h-[2px]"
+                          style={{ height: `${(f.count / max) * 100}%` }} />
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded-xl border border-white/[0.07] bg-[#121212] p-4">
+                <p className="text-[12px] font-bold mb-2">Empfehlungen</p>
+                <ul className="space-y-1.5 text-[12px] text-gray-300 list-disc pl-4">
+                  {insights.tips.length ? insights.tips.map((t) => <li key={t}>{t}</li>) : <li>Läuft gut – Kurs halten und regelmäßig posten.</li>}
+                </ul>
+                {Object.keys(insights.bestHourByPlatform).length > 0 && (
+                  <p className="text-[11px] text-gray-500 mt-3">
+                    Beste Uhrzeit laut deinen Daten: {Object.entries(insights.bestHourByPlatform).map(([pl, h]) => `${PLATFORMS[pl]?.label || pl} ${h}:00`).join(" · ")}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {view === "overview" && (
+            <div className="max-w-5xl overflow-x-auto">
+              <table className="w-full text-[12px]">
+                <thead>
+                  <tr className="text-left text-[10px] uppercase tracking-wider text-gray-500">
+                    {["Profil", "Nische", "Follower", "Wachstum", "Reichweite", "Ø Engagement", "Geplant", "Fällig"].map((h) => <th key={h} className="py-2 pr-4">{h}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {state.profiles.map((p) => {
+                    const ins = insightsById[p.id];
+                    const planned = state.posts.filter((x) => x.profileId === p.id && x.status !== "gepostet").length;
+                    const due = dueToday.filter((x) => x.profileId === p.id).length;
+                    return (
+                      <tr key={p.id} className="border-t border-white/[0.06] hover:bg-white/[0.02] cursor-pointer" onClick={() => { setActiveId(p.id); setView("plan"); }}>
+                        <td className="py-2 pr-4 font-semibold">{p.name} <span className="text-gray-500 font-normal">{p.handle}</span></td>
+                        <td className="py-2 pr-4 text-gray-400">{p.niche}</td>
+                        <td className="py-2 pr-4">{formatNumber(ins.followersLatest)}</td>
+                        <td className={`py-2 pr-4 ${ins.followerGrowth >= 0 ? "text-emerald-300" : "text-red-300"}`}>{ins.followerGrowth >= 0 ? "+" : ""}{formatNumber(ins.followerGrowth)}</td>
+                        <td className="py-2 pr-4">{formatNumber(ins.totalReach)}</td>
+                        <td className="py-2 pr-4">{(ins.avgEngagement * 100).toFixed(1)} %</td>
+                        <td className="py-2 pr-4">{planned}</td>
+                        <td className={`py-2 pr-4 ${due ? "text-amber-300 font-semibold" : "text-gray-600"}`}>{due}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              <p className="text-[11px] text-gray-600 mt-4 leading-relaxed">
+                Gepostet wird manuell oder per CSV-Import in ein Scheduling-Tool (z. B. Buffer, Later, Meta Business Suite).
+                Captions enthalten automatisch einen KI-Hinweis – Instagram, TikTok und YouTube verlangen eine Kennzeichnung von KI-Inhalten.
+              </p>
+            </div>
+          )}
+        </div>
+      </main>
+      <Toaster position="top-right" containerStyle={{ zIndex: 99999 }} toastOptions={{ style: { background: "#18181b", color: "#fff", border: "1px solid rgba(255,255,255,0.15)", fontSize: "13px" } }} />
+    </div>
+  );
+}
