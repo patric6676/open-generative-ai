@@ -214,3 +214,35 @@ test('pickAutoImageQueue is opt-in and respects the daily cap', async () => {
     state.settings.imageLog = { date: '2026-10-15', count: 3 };
     assert.equal(pickAutoImageQueue(state, now).length, 0, 'quota used up');
 });
+
+test('Buffer export: exact headers, time format, only approved future posts with direct images', async () => {
+    const { createDefaultState, planWeek, bufferExportFor, buildBufferCsv } = await load();
+    const state = createDefaultState();
+    const profile = { ...state.profiles[0], platforms: ['instagram'] };
+    const now = new Date('2026-10-15T10:00:00');
+    const posts = planWeek(profile, new Date('2026-10-16T00:00:00'), null, seeded());
+    posts[0].status = 'freigegeben'; posts[0].imageUrl = 'https://cdn.muapi.ai/out/a.png';
+    posts[1].status = 'freigegeben'; posts[1].imageUrl = 'https://cdn.muapi.ai/out/no-extension';
+    posts[2].status = 'bild'; posts[2].imageUrl = 'https://cdn.muapi.ai/out/c.jpg';
+    posts[3].status = 'freigegeben'; posts[3].imageUrl = 'https://cdn.muapi.ai/out/d.jpg'; posts[3].exportedAt = now.toISOString();
+    state.posts = posts;
+    const { ready, skipped } = bufferExportFor(state, profile.id, 'instagram', now);
+    assert.deepEqual(ready.map((p) => p.id), [posts[0].id]);
+    assert.deepEqual(skipped.map((p) => p.id), [posts[1].id]);
+    const csv = buildBufferCsv(ready);
+    const [header, row] = csv.replace(/^﻿/, '').split('\r\n');
+    assert.equal(header, 'Text,Image URL,Tags,Posting Time');
+    assert.match(row, /,https:\/\/cdn\.muapi\.ai\/out\/a\.png,,\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+});
+
+test('exported posts become posted once their time has passed', async () => {
+    const { markPublishedExports } = await load();
+    const state = { profiles: [], posts: [
+        { id: 'a', status: 'freigegeben', exportedAt: '2026-10-10T00:00:00Z', scheduledAt: '2026-10-14T10:00:00Z' },
+        { id: 'b', status: 'freigegeben', exportedAt: '2026-10-10T00:00:00Z', scheduledAt: '2026-10-20T10:00:00Z' },
+        { id: 'c', status: 'freigegeben', exportedAt: '', scheduledAt: '2026-10-14T10:00:00Z' },
+    ] };
+    const { state: next, changed } = markPublishedExports(state, new Date('2026-10-15T10:00:00Z'));
+    assert.equal(changed, 1);
+    assert.deepEqual(next.posts.map((p) => p.status), ['gepostet', 'freigegeben', 'freigegeben']);
+});
