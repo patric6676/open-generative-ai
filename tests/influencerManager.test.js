@@ -386,3 +386,34 @@ test('switching modes keeps a locked person but not an everyday look', async () 
     // Within glamour, the locked look/scene now stays fixed across the batch.
     assert.equal(new Set(glam.map((g) => g.traits.outfit + g.traits.location)).size, 1);
 });
+
+test('image cost: cheap model by default, premium reference images, estimates', async () => {
+    const { createDefaultState, imageModelsFor, estimateImageCost, weeklyImageEstimate, sanitizeSettings, formatUsd } = await load();
+    const state = createDefaultState();
+    assert.equal(imageModelsFor(state.settings, 'post').t2i, 'nano-banana-2-lite');
+    assert.equal(imageModelsFor(state.settings, 'post').edit, 'nano-banana-2-lite-edit');
+    assert.equal(imageModelsFor(state.settings, 'avatar').t2i, 'nano-banana-pro');
+    assert.equal(imageModelsFor({ ...state.settings, avatarPremium: false }, 'avatar').t2i, 'nano-banana-2-lite');
+    assert.equal(imageModelsFor({ ...state.settings, imageQuality: 'premium' }, 'post').t2i, 'nano-banana-pro');
+    assert.equal(sanitizeSettings({ imageQuality: '__proto__' }).imageQuality, 'sparsam');
+    assert.equal(formatUsd(estimateImageCost(10, state.settings)), '$0.30');
+    assert.equal(formatUsd(estimateImageCost(10, { imageQuality: 'premium' })), '$1.20');
+    // 5 starter profiles post 24 times a week.
+    assert.deepEqual(weeklyImageEstimate(state), { posts: 24, cost: 24 * 0.03 });
+});
+
+test('bulk image queue only covers open posts without image due within 7 days', async () => {
+    const { createDefaultState, bulkImageQueue } = await load();
+    const state = createDefaultState();
+    const now = new Date('2026-10-15T10:00:00');
+    const at = (d) => new Date(now.getTime() + d * 86400000).toISOString();
+    state.posts = [
+        { id: 'a', profileId: 'profile_1', status: 'idee', imageUrl: '', scheduledAt: at(1) },
+        { id: 'b', profileId: 'profile_1', status: 'idee', imageUrl: '', scheduledAt: at(10) },
+        { id: 'c', profileId: 'profile_1', status: 'bild', imageUrl: 'https://x/a.png', scheduledAt: at(2) },
+        { id: 'd', profileId: 'profile_1', status: 'gepostet', imageUrl: '', scheduledAt: at(-1) },
+        { id: 'e', profileId: 'profile_2', status: 'idee', imageUrl: '', scheduledAt: at(3) },
+    ];
+    assert.deepEqual(bulkImageQueue(state, ['profile_1'], now).map((p) => p.id), ['a']);
+    assert.deepEqual(bulkImageQueue(state, ['profile_1', 'profile_2'], now).map((p) => p.id), ['a', 'e']);
+});
