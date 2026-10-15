@@ -316,6 +316,28 @@ export function buildImagePrompt(profile, post) {
   ].join(", ");
 }
 
+// Prompt for a profile's reference image. The appearance comes first and
+// unchanged, so the face matches every post prompt that starts with it.
+// Built for a real-looking photo: one named light source, a real lens,
+// skin texture instead of "ultra realistic" superlatives, a calm but real
+// background so edit models can lift the face cleanly.
+export function buildAvatarPrompt(profile) {
+  const appearance = String(profile?.appearance || "").trim();
+  let subject = appearance;
+  if (!/\badult\b/i.test(subject)) {
+    subject = /\b\d{2}\s*-?\s*year/i.test(subject) ? `adult, ${subject}` : `adult in their mid-twenties, ${subject}`;
+  }
+  return [
+    subject,
+    "head-and-shoulders portrait, facing the camera with a relaxed natural smile",
+    "in front of a plain light wall at home, softly out of focus",
+    "soft window light from the left",
+    "50mm lens at f/2.8, sharp focus on the eyes",
+    "natural skin texture with visible pores, subtle imperfections, flyaway hairs, true-to-life colors, unretouched",
+    "3:4",
+  ].join(", ");
+}
+
 export function buildCaption(profile, post, random = Math.random) {
   const hooks = has(HOOKS, profile.tone) ? HOOKS[profile.tone] : HOOKS.motivierend;
   const ctas = has(CTAS, post.format) ? CTAS[post.format] : CTAS.Foto;
