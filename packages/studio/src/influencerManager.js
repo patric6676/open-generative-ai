@@ -3,7 +3,9 @@
 // (plus an optional `random` function) so it can be unit-tested in Node.
 
 export const STORAGE_KEY = "influencer_manager_v1";
-export const MAX_PROFILES = 5;
+import { PRESET_PROFILES } from "./profilePresets.js";
+
+export const MAX_PROFILES = 20;
 
 export const PLATFORMS = {
   instagram: { label: "Instagram", aspectRatio: "4:5", bestHours: [7, 12, 18, 20], maxHashtags: 15 },
@@ -584,4 +586,47 @@ export function markPublishedExports(state, now = new Date()) {
     return p;
   });
   return { state: changed ? { ...state, posts } : state, changed };
+}
+
+// ── Profile management ──────────────────────────────────────────────────────
+
+// Adds the ready-made profiles that aren't in the state yet, up to MAX_PROFILES.
+export function addPresetProfiles(state) {
+  const have = new Set(state.profiles.map((p) => p.id));
+  const room = Math.max(0, MAX_PROFILES - state.profiles.length);
+  const added = PRESET_PROFILES.filter((p) => !have.has(p.id)).slice(0, room)
+    .map((p, i) => sanitizeProfile({ ...p, avatarUrl: "", followers: [] }, state.profiles.length + i));
+  return { state: added.length ? { ...state, profiles: [...state.profiles, ...added] } : state, added: added.length };
+}
+
+export function missingPresetCount(state) {
+  const have = new Set(state.profiles.map((p) => p.id));
+  const missing = PRESET_PROFILES.filter((p) => !have.has(p.id)).length;
+  return Math.min(missing, Math.max(0, MAX_PROFILES - state.profiles.length));
+}
+
+export function createBlankProfile(appearance, index) {
+  return sanitizeProfile({
+    id: makeId("profile"),
+    name: `Neues Profil ${index + 1}`,
+    handle: "",
+    niche: "Lifestyle",
+    appearance,
+    tone: TONES[0],
+    audience: "",
+    platforms: ["instagram"],
+    postsPerWeek: 3,
+    pillars: ["Lifestyle", "Outfit", "Alltag"],
+    hashtags: ["#lifestyle", "#instadaily"],
+  }, index);
+}
+
+// Removes a profile and its posts; the last profile can't be removed.
+export function removeProfile(state, profileId) {
+  if (state.profiles.length <= 1) return state;
+  return {
+    ...state,
+    profiles: state.profiles.filter((p) => p.id !== profileId),
+    posts: state.posts.filter((p) => p.profileId !== profileId),
+  };
 }
