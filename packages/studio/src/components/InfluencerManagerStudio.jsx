@@ -28,6 +28,11 @@ import {
   buildImagePrompt,
   engagementRate,
   exportScheduleCsv,
+  MAX_PROFILES,
+  addPresetProfiles,
+  missingPresetCount,
+  createBlankProfile,
+  removeProfile,
   makeId,
   bestHourFor,
 } from "../influencerManager.js";
@@ -52,7 +57,8 @@ function loadState() {
   if (typeof window === "undefined") return createDefaultState();
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    return raw ? parseState(raw) : createDefaultState();
+    // First start: the 5 starter profiles plus the 15 ready-made ones.
+    return raw ? parseState(raw) : addPresetProfiles(createDefaultState()).state;
   } catch {
     return createDefaultState();
   }
@@ -100,7 +106,8 @@ function Kpi({ label, value, hint }) {
 }
 
 // ─── Profile editor ─────────────────────────────────────────────────────────
-function ProfileTab({ profile, onChange, onGenerateAvatar, busy }) {
+function ProfileTab({ profile, onChange, onGenerateAvatar, busy, onDelete, canDelete, postCount }) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const set = (key) => (e) => onChange({ [key]: e.target.value });
   const setList = (key) => (e) => onChange({ [key]: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) });
   const togglePlatform = (id) => {
@@ -168,6 +175,19 @@ function ProfileTab({ profile, onChange, onGenerateAvatar, busy }) {
             ))}
           </div>
         </Field>
+        {canDelete && (
+          <div className="md:col-span-2 flex flex-wrap items-center gap-2 pt-3 border-t border-white/[0.06]">
+            {confirmDelete ? (
+              <>
+                <span className="text-[12px] text-red-300">{profile.name} und {postCount} Posts endgültig löschen?</span>
+                <button className={btnCls + " text-red-300"} onClick={onDelete}>Ja, löschen</button>
+                <button className={btnCls} onClick={() => setConfirmDelete(false)}>Abbrechen</button>
+              </>
+            ) : (
+              <button className={btnCls + " text-red-300"} onClick={() => setConfirmDelete(true)}>Profil löschen</button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -496,7 +516,7 @@ export default function InfluencerManagerStudio({
           ? { ...p, plannedUntil: end.toISOString() } : p)),
       };
     });
-    toast.success(profileIds.length > 1 ? "Wochenplan für alle 5 Profile erstellt" : "Wochenplan erstellt");
+    toast.success(profileIds.length > 1 ? `Wochenplan für alle ${profileIds.length} Profile erstellt` : "Wochenplan erstellt");
     setView("plan");
   };
 
@@ -639,7 +659,34 @@ export default function InfluencerManagerStudio({
     const timer = setInterval(tick, 60 * 60 * 1000);
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loaded, apiKey, settings.autoPlan, settings.autoImages, settings.planAheadDays, settings.imagesPerDay]);
+    // Re-run when profiles are added or removed so new ones get planned at once.
+  }, [loaded, apiKey, settings.autoPlan, settings.autoImages, settings.planAheadDays, settings.imagesPerDay, state.profiles.length]);
+
+  const presetsMissing = missingPresetCount(state);
+
+  const addPresets = () => {
+    const { state: next, added } = addPresetProfiles(state);
+    setState(next);
+    toast.success(`${added} Profile hinzugefügt – sie werden automatisch eingeplant.`);
+  };
+
+  // New profile with a random adult woman (20–25) from the prompt randomizer.
+  const addRandomProfile = () => {
+    const [idea] = generateBatch(1);
+    const created = createBlankProfile(idea.appearance, state.profiles.length);
+    setState((s) => ({ ...s, profiles: [...s.profiles, created] }));
+    setActiveId(created.id);
+    setView("profil");
+    toast.success("Neues Profil angelegt – Name, Nische und Plattformen anpassen.");
+  };
+
+  const deleteProfile = () => {
+    const name = profile.name;
+    const next = removeProfile(state, profile.id);
+    setState(next);
+    setActiveId(next.profiles[0].id);
+    toast.success(`${name} gelöscht`);
+  };
 
   const allIds = state.profiles.map((p) => p.id);
   const dueToday = state.posts.filter((p) => p.status === "freigegeben" && new Date(p.scheduledAt) <= new Date());
@@ -650,7 +697,17 @@ export default function InfluencerManagerStudio({
       <aside className="w-full md:w-[220px] shrink-0 border-b md:border-b-0 md:border-r border-white/[0.07] bg-[#101010] flex flex-col max-h-[45%] md:max-h-none">
         <div className="px-4 py-4 border-b border-white/[0.07]">
           <p className="text-[13px] font-bold">Influencer Manager</p>
-          <p className="text-[10px] text-gray-500 mt-0.5">5 KI-Profile · Plan · Reichweite</p>
+          <p className="text-[10px] text-gray-500 mt-0.5">{state.profiles.length} KI-Profile · Plan · Reichweite</p>
+          {(presetsMissing > 0 || state.profiles.length < MAX_PROFILES) && (
+            <div className="flex flex-wrap gap-1.5 mt-2">
+              {presetsMissing > 0 && (
+                <button className={btnCls + " px-2 py-1 text-[11px]"} onClick={addPresets}>+ {presetsMissing} Vorlagen</button>
+              )}
+              {state.profiles.length < MAX_PROFILES && (
+                <button className={btnCls + " px-2 py-1 text-[11px]"} onClick={addRandomProfile}>+ Neues Profil</button>
+              )}
+            </div>
+          )}
         </div>
         <div className="md:flex-1 flex md:block gap-1 overflow-x-auto md:overflow-y-auto p-2 md:space-y-1">
           {state.profiles.map((p) => {
@@ -702,7 +759,9 @@ export default function InfluencerManagerStudio({
 
         <div className="flex-1 overflow-y-auto p-4 md:p-6">
           {view === "profil" && (
-            <ProfileTab profile={profile} onChange={updateProfile} busy={!!busyIds[`avatar_${profile.id}`]} onGenerateAvatar={() => generateAvatar(profile)} />
+            <ProfileTab key={profile.id} profile={profile} onChange={updateProfile} busy={!!busyIds[`avatar_${profile.id}`]} onGenerateAvatar={() => generateAvatar(profile)}
+              canDelete={state.profiles.length > 1} onDelete={deleteProfile}
+              postCount={state.posts.filter((p) => p.profileId === profile.id).length} />
           )}
 
           {view === "plan" && (

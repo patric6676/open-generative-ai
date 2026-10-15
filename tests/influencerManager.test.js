@@ -16,9 +16,9 @@ function seeded(seed = 1) {
 }
 
 test('default state has five distinct profiles', async () => {
-    const { createDefaultState, MAX_PROFILES } = await load();
+    const { createDefaultState } = await load();
     const state = createDefaultState();
-    assert.equal(state.profiles.length, MAX_PROFILES);
+    assert.equal(state.profiles.length, 5);
     assert.equal(new Set(state.profiles.map((p) => p.id)).size, 5);
     assert.deepEqual(state.posts, []);
 });
@@ -28,8 +28,8 @@ test('parseState falls back to defaults on garbage and caps profiles', async () 
     assert.equal(parseState('not json').profiles.length, 5);
     assert.equal(parseState({ foo: 1 }).profiles.length, 5);
     const many = createDefaultState();
-    many.profiles = [...many.profiles, ...many.profiles];
-    assert.equal(parseState(JSON.stringify(many)).profiles.length, 5);
+    many.profiles = Array.from({ length: 5 }, () => many.profiles).flat();
+    assert.equal(parseState(JSON.stringify(many)).profiles.length, 20);
 });
 
 test('planWeek creates postsPerWeek posts within 7 days with captions and AI disclosure', async () => {
@@ -298,4 +298,50 @@ test('randomizer: night locations get night light', async () => {
         const night = traits.location.includes('at night');
         assert.ok((night ? OPTIONS.nightLight : OPTIONS.light).includes(traits.light), `${traits.location} / ${traits.light}`);
     }
+});
+
+const presetsPath = pathToFileURL(path.join(__dirname, '../packages/studio/src/profilePresets.js')).href;
+
+test('presets: 15 adult women aged 20-25 with valid, Instagram-safe data', async () => {
+    const { PRESET_PROFILES } = await import(presetsPath);
+    const { sanitizeProfile, TONES, PLATFORMS } = await load();
+    assert.equal(PRESET_PROFILES.length, 15);
+    assert.equal(new Set(PRESET_PROFILES.map((p) => p.id)).size, 15);
+    assert.equal(new Set(PRESET_PROFILES.map((p) => p.handle)).size, 15);
+    const banned = /\b(girl|teen|teenage|young-looking|child|kid|school|lingerie|underwear|nude|naked|topless|sexy)\b/i;
+    for (const p of PRESET_PROFILES) {
+        const age = Number(p.appearance.match(/^(\d+) year old adult [A-Za-z -]+ woman,/)?.[1]);
+        assert.ok(age >= 20 && age <= 25, `${p.name}: ${p.appearance}`);
+        assert.ok(TONES.includes(p.tone), p.tone);
+        assert.ok(p.platforms.every((pl) => pl in PLATFORMS));
+        assert.doesNotMatch(JSON.stringify(p), banned, p.name);
+        // Survives sanitising unchanged (nothing truncated or dropped).
+        const clean = sanitizeProfile(p, 0);
+        for (const key of ['id', 'name', 'handle', 'appearance', 'tone', 'postsPerWeek']) assert.equal(clean[key], p[key], `${p.name}.${key}`);
+        assert.deepEqual(clean.pillars, p.pillars);
+    }
+});
+
+test('presets can be added once, up to 20 profiles, and survive a reload', async () => {
+    const { createDefaultState, addPresetProfiles, missingPresetCount, parseState, MAX_PROFILES } = await load();
+    const state = createDefaultState();
+    assert.equal(missingPresetCount(state), 15);
+    const { state: full, added } = addPresetProfiles(state);
+    assert.equal(added, 15);
+    assert.equal(full.profiles.length, MAX_PROFILES);
+    assert.equal(addPresetProfiles(full).added, 0, 'no duplicates');
+    assert.equal(missingPresetCount(full), 0);
+    assert.equal(parseState(JSON.stringify(full)).profiles.length, 20);
+});
+
+test('removeProfile drops its posts and keeps at least one profile', async () => {
+    const { createDefaultState, ensurePlanned, applyPlan, removeProfile } = await load();
+    let state = createDefaultState();
+    state = applyPlan(state, ensurePlanned(state, new Date('2026-10-15T10:00:00'), seeded()));
+    const next = removeProfile(state, 'profile_1');
+    assert.equal(next.profiles.length, 4);
+    assert.ok(next.posts.every((p) => p.profileId !== 'profile_1'));
+    assert.ok(next.posts.length < state.posts.length);
+    const single = { ...state, profiles: [state.profiles[0]] };
+    assert.equal(removeProfile(single, 'profile_1'), single);
 });
