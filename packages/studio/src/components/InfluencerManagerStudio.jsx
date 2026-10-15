@@ -28,7 +28,10 @@ import {
   buildImagePrompt,
   engagementRate,
   exportScheduleCsv,
+  makeId,
+  bestHourFor,
 } from "../influencerManager.js";
+import { generateBatch, GROUPS } from "../promptRandomizer.js";
 
 const T2I_MODEL = "nano-banana-pro";
 const EDIT_MODEL = "nano-banana-pro-edit";
@@ -261,6 +264,91 @@ function PostCard({ post, profile, busy, onUpdate, onGenerate, onDelete }) {
   );
 }
 
+// ─── Prompt randomizer ──────────────────────────────────────────────────────
+function RandomizerTab({ profile, busyIds, onGenerate, onUseAppearance, onAddToPlan }) {
+  const [locked, setLocked] = useState([]);
+  const [count, setCount] = useState(3);
+  const [items, setItems] = useState([]);
+
+  const roll = () => {
+    const base = items[0]?.traits || null;
+    setItems(generateBatch(count, base, locked).map((r) => ({ ...r, id: makeId("idea"), imageUrl: "" })));
+  };
+
+  // Start with a batch so the tab shows what it does right away.
+  useEffect(() => { roll(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const toggleLock = (group) =>
+    setLocked((l) => (l.includes(group) ? l.filter((g) => g !== group) : [...l, group]));
+  const updateItem = (id, patch) => setItems((list) => list.map((it) => (it.id === id ? { ...it, ...patch } : it)));
+
+  const generate = async (item) => {
+    const url = await onGenerate(item);
+    if (url) updateItem(item.id, { imageUrl: url });
+  };
+
+  return (
+    <div className="space-y-4 max-w-4xl">
+      <div className="rounded-xl border border-white/[0.07] bg-[#121212] p-4 space-y-3">
+        <p className="text-[12px] text-gray-400">
+          Zufällige Instagram-Fotoprompts für Frauen zwischen 20 und 25. Fixiere Bereiche, die gleich bleiben sollen –
+          z. B. „Person“, um dieselbe Frau in immer neuen Szenen zu zeigen.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          {Object.entries(GROUPS).map(([id, g]) => (
+            <button key={id} type="button" onClick={() => toggleLock(id)}
+              className={`px-2.5 py-1 rounded-md text-[11px] font-semibold border transition-colors ${
+                locked.includes(id) ? "bg-violet-600/30 border-violet-500/50 text-white" : "bg-white/[0.03] border-white/10 text-gray-400"
+              }`}>
+              {locked.includes(id) ? "🔒 " : ""}{g.label} {locked.includes(id) ? "fixiert" : "zufällig"}
+            </button>
+          ))}
+          <select id="idea-count" className="ml-auto bg-[#161616] border border-white/[0.08] rounded-lg px-3 py-2 text-[12px] text-gray-200 outline-none"
+            value={count} onChange={(e) => setCount(Number(e.target.value))}>
+            {[1, 3, 5, 10].map((n) => <option key={n} value={n}>{n} {n === 1 ? "Prompt" : "Prompts"}</option>)}
+          </select>
+          <button className={primaryBtnCls} onClick={roll}>🎲 Würfeln</button>
+        </div>
+      </div>
+
+      {items.map((item) => (
+        <div key={item.id} className="rounded-xl border border-white/[0.07] bg-[#121212] p-3 flex flex-col sm:flex-row gap-3">
+          <div className="w-full max-w-[160px] sm:w-32 shrink-0">
+            <div className="aspect-[4/5] rounded-lg overflow-hidden bg-[#1a1a1a] border border-white/[0.06] flex items-center justify-center">
+              {busyIds[item.id] ? (
+                <div className="w-6 h-6 border-2 border-violet-500/20 border-t-violet-500 rounded-full animate-spin" />
+              ) : safeImageUrl(item.imageUrl) ? (
+                <img src={safeImageUrl(item.imageUrl)} alt="" referrerPolicy="no-referrer" className="w-full h-full object-cover" />
+              ) : (
+                <span className="text-[10px] text-gray-600">kein Bild</span>
+              )}
+            </div>
+            <button className={btnCls + " w-full mt-2"} disabled={!!busyIds[item.id]} onClick={() => generate(item)}>
+              {item.imageUrl ? "Neu" : "Bild"} generieren
+            </button>
+          </div>
+          <div className="flex-1 min-w-0 space-y-2">
+            <div className="flex flex-wrap gap-1">
+              {[`${item.traits.age} Jahre`, item.traits.origin, item.traits.hairColor, item.traits.aesthetic, item.traits.location].map((t) => (
+                <span key={t} className="px-2 py-0.5 rounded-md text-[10px] bg-white/[0.05] text-gray-400">{t}</span>
+              ))}
+            </div>
+            <textarea className={inputCls + " h-28 resize-y text-[11px]"} value={item.prompt}
+              onChange={(e) => updateItem(item.id, { prompt: e.target.value })} />
+            <div className="flex flex-wrap gap-1.5">
+              <button className={btnCls} onClick={() => {
+                navigator.clipboard?.writeText(item.prompt).then(() => toast.success("Prompt kopiert"), () => toast.error("Kopieren nicht möglich – Text markieren und kopieren"));
+              }}>Kopieren</button>
+              <button className={btnCls} onClick={() => onAddToPlan(item)}>In Content-Plan von {profile.name}</button>
+              <button className={btnCls} onClick={() => onUseAppearance(item)}>Als Aussehen von {profile.name}</button>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ─── Main component ─────────────────────────────────────────────────────────
 export default function InfluencerManagerStudio({
   apiKey,
@@ -429,6 +517,44 @@ export default function InfluencerManagerStudio({
     toast.success(`${ready.length} ${ready.length === 1 ? "Post" : "Posts"} für ${PLATFORMS[platform].label} exportiert. Jetzt in Buffer beim Kanal von ${profile.handle} hochladen.`);
   };
 
+  const generateIdeaImage = async (item) => {
+    if (!requireKey()) return null;
+    return runGeneration(item.id, () => generateImage(apiKey, { model: T2I_MODEL, prompt: item.prompt, aspect_ratio: "4:5" }));
+  };
+
+  const useIdeaAppearance = (item) => {
+    const image = safeImageUrl(item.imageUrl);
+    updateProfile({ appearance: item.appearance, ...(image ? { avatarUrl: image } : {}) });
+    toast.success(image
+      ? `Aussehen und Referenzbild von ${profile.name} übernommen`
+      : `Aussehen übernommen – erzeuge im Tab „Profil“ ein neues Referenzbild`);
+  };
+
+  const addIdeaToPlan = (item) => {
+    const platform = profile.platforms[0] || "instagram";
+    const when = new Date();
+    when.setDate(when.getDate() + 1);
+    when.setHours(bestHourFor(platform), 0, 0, 0);
+    const image = safeImageUrl(item.imageUrl);
+    const post = {
+      id: makeId("post"),
+      profileId: profile.id,
+      platform,
+      format: "Foto",
+      pillar: "Prompt-Idee",
+      scene: "",
+      scheduledAt: when.toISOString(),
+      status: image ? "bild" : "idee",
+      imageUrl: image,
+      exportedAt: "",
+      metrics: null,
+      prompt: item.prompt,
+    };
+    post.caption = buildCaption(profile, post);
+    setState((s) => ({ ...s, posts: [...s.posts, post] }));
+    toast.success(`Zum Content-Plan von ${profile.name} hinzugefügt (morgen ${String(when.getHours()).padStart(2, "0")}:00)`);
+  };
+
   const refreshPrompts = () => {
     setState((s) => ({
       ...s,
@@ -563,7 +689,7 @@ export default function InfluencerManagerStudio({
       {/* Main */}
       <main className="flex-1 min-w-0 min-h-0 flex flex-col">
         <div className="flex flex-wrap items-center gap-1 px-4 md:px-6 pt-4 pb-3 border-b border-white/[0.07] shrink-0">
-          {[["plan", "Content-Plan"], ["profil", "Profil"], ["analytics", "Reichweite"], ["overview", "Übersicht"], ["auto", "Automatik"]].map(([id, label]) => (
+          {[["plan", "Content-Plan"], ["profil", "Profil"], ["analytics", "Reichweite"], ["ideen", "Prompt-Ideen"], ["overview", "Übersicht"], ["auto", "Automatik"]].map(([id, label]) => (
             <button key={id} type="button" onClick={() => setView(id)}
               className={`px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-colors ${view === id ? "bg-white/10 text-white" : "text-gray-500 hover:text-gray-300"}`}>
               {label}
@@ -660,6 +786,11 @@ export default function InfluencerManagerStudio({
                 )}
               </div>
             </div>
+          )}
+
+          {view === "ideen" && (
+            <RandomizerTab profile={profile} busyIds={busyIds} onGenerate={generateIdeaImage}
+              onUseAppearance={useIdeaAppearance} onAddToPlan={addIdeaToPlan} />
           )}
 
           {view === "auto" && (
