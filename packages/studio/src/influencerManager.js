@@ -182,12 +182,44 @@ const DEFAULT_PROFILES = [
   },
 ];
 
+// Opening lines by tone. They must fit every niche, so they name the post's
+// pillar ({pillar}) instead of assuming a topic like cooking or travel.
 const HOOKS = {
-  motivierend: ["Nur 10 Minuten heute – du schaffst das 💪", "Kleine Schritte, große Wirkung:", "Ausreden zählen heute nicht:"],
-  neugierig: ["Das hätte ich hier nie erwartet 👀", "Kaum jemand kennt diesen Ort:", "Spar dir den Touri-Stress:"],
-  witzig: ["Mein Wallet weint, aber egal 😅", "POV: Du entdeckst dieses Tool um 2 Uhr nachts", "Hot Take incoming 🔥"],
-  herzlich: ["Heute koche ich euch was Gemütliches 🧡", "Dieses Rezept geht immer:", "Wenn's schnell gehen muss:"],
-  selbstbewusst: ["Ein Teil, drei Looks.", "Unterschätzt, aber genial:", "So wirkt jedes Outfit teurer:"],
+  motivierend: [
+    "{pillar}: Heute zählt jeder kleine Schritt 💪",
+    "Keine Ausreden heute – {pillar} 🔥",
+    "{pillar} in 10 Minuten. Du schaffst das.",
+    "Dein Reminder für heute: {pillar} ✨",
+    "Klein anfangen, dranbleiben: {pillar}",
+  ],
+  neugierig: [
+    "{pillar}: 3 Dinge, die kaum jemand weiß 👀",
+    "Kennst du das schon? {pillar} 🧭",
+    "Das hätte ich bei {pillar} nicht erwartet",
+    "Frage an dich: Wie machst du {pillar}? 🤔",
+    "{pillar} – mal anders gedacht",
+  ],
+  witzig: [
+    "POV: {pillar} um 2 Uhr nachts 😅",
+    "{pillar}, aber ehrlich 😂",
+    "Niemand: … Ich: {pillar} 🙃",
+    "Hot Take zu {pillar} 🔥",
+    "{pillar}: Erwartung vs. Realität",
+  ],
+  herzlich: [
+    "Heute für dich: {pillar} 🧡",
+    "Ein bisschen {pillar} für deinen Tag ☀️",
+    "{pillar} – so einfach kann's sein",
+    "Mein Lieblingsmoment der Woche: {pillar}",
+    "Für alle, die heute etwas Ruhe brauchen: {pillar}",
+  ],
+  selbstbewusst: [
+    "{pillar}, aber richtig.",
+    "Unterschätzt: {pillar}",
+    "{pillar} – der Unterschied liegt im Detail.",
+    "Spar dir diesen Fehler bei {pillar} 👇",
+    "So geht {pillar} auf das nächste Level.",
+  ],
 };
 
 const CTAS = {
@@ -338,20 +370,23 @@ export function buildAvatarPrompt(profile) {
   ].join(", ");
 }
 
-export function buildCaption(profile, post, random = Math.random) {
+// `variant` picks hook and CTA in turn (planWeek passes the post's index so
+// a week never repeats an opening line); without it they are random.
+export function buildCaption(profile, post, random = Math.random, variant = null) {
   const hooks = has(HOOKS, profile.tone) ? HOOKS[profile.tone] : HOOKS.motivierend;
   const ctas = has(CTAS, post.format) ? CTAS[post.format] : CTAS.Foto;
+  const choose = (list) => (Number.isInteger(variant) ? list[variant % list.length] : pick(list, random));
   const maxTags = has(PLATFORMS, post.platform) ? PLATFORMS[post.platform].maxHashtags : 5;
   const pillarTag = `#${post.pillar.toLowerCase().replace(/[^a-z0-9äöüß]/g, "")}`;
   const tags = [...new Set([pillarTag, ...(profile.hashtags || [])])].slice(0, maxTags);
   return [
-    pick(hooks, random),
-    profile.audience ? `${post.pillar} – für ${profile.audience}.` : `${post.pillar}.`,
-    pick(ctas, random),
+    choose(hooks).replace("{pillar}", post.pillar),
+    profile.audience ? `Für ${profile.audience}.` : null,
+    choose(ctas),
     "",
     tags.join(" "),
     AI_DISCLOSURE,
-  ].join("\n");
+  ].filter((line) => line !== null).join("\n");
 }
 
 // Choose pillars for the week, weighting toward the ones that performed best.
@@ -381,6 +416,8 @@ export function planWeek(profile, startDate, insights, random = Math.random) {
   const platforms = profile.platforms?.length ? profile.platforms : ["instagram"];
   const days = pickPostingDays(profile.postsPerWeek || 3, startDate);
   const pillars = weightedPillars(profile, insights, days.length, random);
+  // Random start, then consecutive hooks, so weeks differ but never repeat.
+  const hookOffset = Math.floor(random() * 1000);
   return days.map((day, i) => {
     const platform = platforms[i % platforms.length];
     const format = platform === "tiktok" || platform === "youtube" ? "Reel" : FORMATS[i % 3];
@@ -399,7 +436,7 @@ export function planWeek(profile, startDate, insights, random = Math.random) {
       metrics: null,
     };
     post.prompt = buildImagePrompt(profile, post);
-    post.caption = buildCaption(profile, post, random);
+    post.caption = buildCaption(profile, post, random, hookOffset + i);
     return post;
   });
 }
