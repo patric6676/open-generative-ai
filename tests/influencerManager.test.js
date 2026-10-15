@@ -417,3 +417,20 @@ test('bulk image queue only covers open posts without image due within 7 days', 
     assert.deepEqual(bulkImageQueue(state, ['profile_1'], now).map((p) => p.id), ['a']);
     assert.deepEqual(bulkImageQueue(state, ['profile_1', 'profile_2'], now).map((p) => p.id), ['a', 'e']);
 });
+
+test('reference image prompt: appearance first and unchanged, adult, no empty superlatives', async () => {
+    const { createDefaultState, addPresetProfiles, buildAvatarPrompt } = await load();
+    const { state } = addPresetProfiles(createDefaultState());
+    assert.equal(state.profiles.length, 20);
+    for (const p of state.profiles) {
+        const prompt = buildAvatarPrompt(p);
+        const subject = /\badult\b/i.test(p.appearance) ? p.appearance : `adult, ${p.appearance}`;
+        assert.ok(prompt.startsWith(subject), `${p.name}: ${prompt.slice(0, 80)}`);
+        assert.match(prompt, /\badult\b/i);
+        assert.match(prompt, /soft window light from the left/);
+        assert.match(prompt, /3:4$/);
+        assert.doesNotMatch(prompt, /ultra|8k|masterpiece|best quality|flawless|perfect skin|cinematic/i, p.name);
+    }
+    // Profile without age gets an adult age range instead of none.
+    assert.match(buildAvatarPrompt({ appearance: 'woman with red hair' }), /^adult in their mid-twenties, woman with red hair/);
+});
