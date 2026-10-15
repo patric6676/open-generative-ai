@@ -405,8 +405,17 @@ export default function InfluencerManagerStudio({
   onGenerationEnd,
   onGenerationComplete,
   onGenerationError,
+  // Optional: hosts where a plain browser download is blocked (e.g. a
+  // sandboxed page) pass their own saver. Resolves true when the file was saved.
+  onDownload,
 }) {
   const [state, setState] = useState(createDefaultState);
+
+  const saveFile = async (filename, text, type) => {
+    if (onDownload) return onDownload(filename, text, type);
+    downloadText(filename, text, type);
+    return true;
+  };
   const [loaded, setLoaded] = useState(false);
   const [activeId, setActiveId] = useState("profile_1");
   const [view, setView] = useState("plan");
@@ -562,7 +571,7 @@ export default function InfluencerManagerStudio({
     setView("plan");
   };
 
-  const exportToBuffer = (platform) => {
+  const exportToBuffer = async (platform) => {
     const { ready, skipped } = bufferExportFor(state, profile.id, platform);
     if (skipped.length) {
       toast.error(`${skipped.length} Posts übersprungen: Bild fehlt oder der Link endet nicht auf .jpg/.png/.webp.`);
@@ -572,7 +581,8 @@ export default function InfluencerManagerStudio({
       return;
     }
     const handle = profile.handle.replace(/[^A-Za-z0-9._-]/g, "") || "profil";
-    downloadText(`buffer_${handle}_${platform}_${new Date().toISOString().slice(0, 10)}.csv`, buildBufferCsv(ready), "text/csv;charset=utf-8");
+    const saved = await saveFile(`buffer_${handle}_${platform}_${new Date().toISOString().slice(0, 10)}.csv`, buildBufferCsv(ready), "text/csv;charset=utf-8");
+    if (!saved) return; // nothing left the app, so don't mark the posts as exported
     const ids = new Set(ready.map((p) => p.id));
     const exportedAt = new Date().toISOString();
     setState((s) => ({ ...s, posts: s.posts.map((p) => (ids.has(p.id) ? { ...p, exportedAt } : p)) }));
@@ -776,9 +786,9 @@ export default function InfluencerManagerStudio({
         <div className="p-3 border-t border-white/[0.07] grid grid-cols-2 md:grid-cols-1 gap-1.5">
           <button className={primaryBtnCls + " w-full"} onClick={() => createWeekPlan(allIds)}>Wochenplan für alle</button>
           <button className={btnCls + " w-full"} disabled={Object.keys(busyIds).length > 0} onClick={() => requestBulkImages(allIds)}>Alle Bilder generieren</button>
-          <button className={btnCls + " w-full"} onClick={() => downloadText(`content-plan_${new Date().toISOString().slice(0, 10)}.csv`, exportScheduleCsv(state), "text/csv;charset=utf-8")}>Plan als CSV</button>
+          <button className={btnCls + " w-full"} onClick={() => saveFile(`content-plan_${new Date().toISOString().slice(0, 10)}.csv`, exportScheduleCsv(state), "text/csv;charset=utf-8")}>Plan als CSV</button>
           <div className="flex gap-1.5 col-span-2 md:col-span-1">
-            <button className={btnCls + " flex-1"} onClick={() => downloadText("influencer-backup.json", JSON.stringify(state, null, 2), "application/json")}>Backup</button>
+            <button className={btnCls + " flex-1"} onClick={() => saveFile("influencer-backup.json", JSON.stringify(state, null, 2), "application/json")}>Backup</button>
             <button className={btnCls + " flex-1"} onClick={() => importRef.current?.click()}>Import</button>
             <input ref={importRef} type="file" accept="application/json" className="hidden"
               onChange={(e) => { const f = e.target.files?.[0]; if (f) importBackup(f); e.target.value = ""; }} />
