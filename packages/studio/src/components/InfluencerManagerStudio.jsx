@@ -26,6 +26,7 @@ import {
   computeInsights,
   buildCaption,
   buildImagePrompt,
+  buildAvatarPrompt,
   engagementRate,
   exportScheduleCsv,
   IMAGE_QUALITY,
@@ -132,6 +133,10 @@ function ProfileTab({ profile, onChange, onGenerateAvatar, busy, onDelete, canDe
         <button className={primaryBtnCls + " w-full"} disabled={busy} onClick={onGenerateAvatar}>
           {busy ? "Generiere…" : profile.avatarUrl ? "Neues Referenzbild" : "Referenzbild generieren"}
         </button>
+        <details className="text-[11px] text-gray-500">
+          <summary className="cursor-pointer select-none">Prompt fürs Referenzbild</summary>
+          <p className="mt-1 leading-relaxed text-gray-400">{buildAvatarPrompt(profile)}</p>
+        </details>
         <Field label="Oder Bild-URL einfügen (nur https)">
           <input className={inputCls} value={profile.avatarUrl} onChange={set("avatarUrl")} placeholder="https://…" maxLength={2048} />
         </Field>
@@ -500,7 +505,7 @@ export default function InfluencerManagerStudio({
     const models = imageModelsFor(stateRef.current.settings, "avatar");
     const url = await runGeneration(`avatar_${target.id}`, () => generateImage(apiKey, {
       model: models.t2i,
-      prompt: `Ultra-realistic portrait photo of ${target.appearance}, neutral background, soft studio light, looking at camera, sharp facial detail`,
+      prompt: buildAvatarPrompt(target),
       aspect_ratio: "3:4",
     }));
     if (url) {
