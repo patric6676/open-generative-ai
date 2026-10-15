@@ -28,6 +28,12 @@ import {
   buildImagePrompt,
   engagementRate,
   exportScheduleCsv,
+  IMAGE_QUALITY,
+  imageModelsFor,
+  estimateImageCost,
+  weeklyImageEstimate,
+  bulkImageQueue,
+  formatUsd,
   MAX_PROFILES,
   addPresetProfiles,
   missingPresetCount,
@@ -38,8 +44,6 @@ import {
 } from "../influencerManager.js";
 import { generateBatch, GROUPS, MODES } from "../promptRandomizer.js";
 
-const T2I_MODEL = "nano-banana-pro";
-const EDIT_MODEL = "nano-banana-pro-edit";
 
 const STATUS_LABEL = { idee: "Idee", bild: "Bild fertig", freigegeben: "Freigegeben", gepostet: "Gepostet" };
 const STATUS_STYLE = {
@@ -410,6 +414,7 @@ export default function InfluencerManagerStudio({
   const [statusFilter, setStatusFilter] = useState("offen");
   const [followerInput, setFollowerInput] = useState("");
   const importRef = useRef(null);
+  const [bulkConfirm, setBulkConfirm] = useState(null);
   // Latest state for the background automation, which runs outside renders.
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -483,8 +488,9 @@ export default function InfluencerManagerStudio({
 
   const generateAvatar = async (target = profile) => {
     if (!requireKey()) return;
+    const models = imageModelsFor(stateRef.current.settings, "avatar");
     const url = await runGeneration(`avatar_${target.id}`, () => generateImage(apiKey, {
-      model: T2I_MODEL,
+      model: models.t2i,
       prompt: `Ultra-realistic portrait photo of ${target.appearance}, neutral background, soft studio light, looking at camera, sharp facial detail`,
       aspect_ratio: "3:4",
     }));
@@ -499,27 +505,38 @@ export default function InfluencerManagerStudio({
     const owner = stateRef.current.profiles.find((p) => p.id === post.profileId);
     const aspect_ratio = post.format === "Reel" || post.format === "Story" ? "9:16" : PLATFORMS[post.platform]?.aspectRatio || "4:5";
     const reference = safeImageUrl(owner?.avatarUrl);
+    const models = imageModelsFor(stateRef.current.settings, "post");
     const url = await runGeneration(post.id, () => (reference
       ? generateI2I(apiKey, {
-          model: EDIT_MODEL,
+          model: models.edit,
           images_list: [reference],
           prompt: `Same person as in the reference image, identical face. ${post.prompt}`,
           aspect_ratio,
         })
-      : generateImage(apiKey, { model: T2I_MODEL, prompt: post.prompt, aspect_ratio })));
+      : generateImage(apiKey, { model: models.t2i, prompt: post.prompt, aspect_ratio })));
     if (url) updatePost(post.id, { imageUrl: url, status: post.status === "idee" ? "bild" : post.status });
     return url;
   };
 
-  const generateAllOpen = async (profileIds) => {
+  // Bulk generation asks first and shows the estimated cost, because one
+  // click across 20 profiles can mean dozens of paid images.
+  const requestBulkImages = (profileIds) => {
     if (!requireKey()) return;
-    const queue = state.posts.filter((p) => profileIds.includes(p.profileId) && !p.imageUrl && p.status !== "gepostet");
-    if (queue.length === 0) { toast("Keine offenen Posts ohne Bild."); return; }
+    const queue = bulkImageQueue(state, profileIds);
+    if (queue.length === 0) { toast("Keine offenen Posts ohne Bild in den nächsten 7 Tagen."); return; }
+    setBulkConfirm({ profileIds, count: queue.length, cost: estimateImageCost(queue.length, state.settings) });
+  };
+
+  const runBulkImages = async () => {
+    const { profileIds } = bulkConfirm;
+    setBulkConfirm(null);
+    const queue = bulkImageQueue(stateRef.current, profileIds);
     toast(`${queue.length} Bilder werden generiert…`);
     // Sequential on purpose: keeps credit usage predictable and avoids rate limits.
     for (const post of queue) {
       // eslint-disable-next-line no-await-in-loop
-      await generatePostImage(post);
+      const url = await generatePostImage(post);
+      if (!url) break; // stop on the first failure instead of burning credits
     }
   };
 
@@ -564,7 +581,8 @@ export default function InfluencerManagerStudio({
 
   const generateIdeaImage = async (item) => {
     if (!requireKey()) return null;
-    return runGeneration(item.id, () => generateImage(apiKey, { model: T2I_MODEL, prompt: item.prompt, aspect_ratio: "4:5" }));
+    const models = imageModelsFor(stateRef.current.settings, "post");
+    return runGeneration(item.id, () => generateImage(apiKey, { model: models.t2i, prompt: item.prompt, aspect_ratio: "4:5" }));
   };
 
   const useIdeaAppearance = (item) => {
@@ -757,7 +775,7 @@ export default function InfluencerManagerStudio({
         </div>
         <div className="p-3 border-t border-white/[0.07] grid grid-cols-2 md:grid-cols-1 gap-1.5">
           <button className={primaryBtnCls + " w-full"} onClick={() => createWeekPlan(allIds)}>Wochenplan für alle</button>
-          <button className={btnCls + " w-full"} disabled={Object.keys(busyIds).length > 0} onClick={() => generateAllOpen(allIds)}>Alle Bilder generieren</button>
+          <button className={btnCls + " w-full"} disabled={Object.keys(busyIds).length > 0} onClick={() => requestBulkImages(allIds)}>Alle Bilder generieren</button>
           <button className={btnCls + " w-full"} onClick={() => downloadText(`content-plan_${new Date().toISOString().slice(0, 10)}.csv`, exportScheduleCsv(state), "text/csv;charset=utf-8")}>Plan als CSV</button>
           <div className="flex gap-1.5 col-span-2 md:col-span-1">
             <button className={btnCls + " flex-1"} onClick={() => downloadText("influencer-backup.json", JSON.stringify(state, null, 2), "application/json")}>Backup</button>
@@ -783,6 +801,16 @@ export default function InfluencerManagerStudio({
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 md:p-6">
+          {bulkConfirm && (
+            <div className="max-w-4xl mb-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 flex flex-wrap items-center gap-3">
+              <p className="text-[12px] text-amber-100 flex-1 min-w-[220px]">
+                {bulkConfirm.count} Bilder für Posts der nächsten 7 Tage generieren?
+                Kosten ca. <span className="font-bold">{formatUsd(bulkConfirm.cost)}</span> ({IMAGE_QUALITY[settings.imageQuality].label}-Qualität).
+              </p>
+              <button className={primaryBtnCls} onClick={runBulkImages}>Ja, generieren</button>
+              <button className={btnCls} onClick={() => setBulkConfirm(null)}>Abbrechen</button>
+            </div>
+          )}
           {view === "profil" && (
             <ProfileTab key={profile.id} profile={profile} onChange={updateProfile} busy={!!busyIds[`avatar_${profile.id}`]} onGenerateAvatar={() => generateAvatar(profile)}
               canDelete={state.profiles.length > 1} onDelete={deleteProfile}
@@ -793,7 +821,7 @@ export default function InfluencerManagerStudio({
             <div className="space-y-3 max-w-4xl">
               <div className="flex flex-wrap items-center gap-2">
                 <button className={primaryBtnCls} onClick={() => createWeekPlan([profile.id])}>+ Wochenplan für {profile.name}</button>
-                <button className={btnCls} disabled={Object.keys(busyIds).length > 0} onClick={() => generateAllOpen([profile.id])}>Offene Bilder generieren</button>
+                <button className={btnCls} disabled={Object.keys(busyIds).length > 0} onClick={() => requestBulkImages([profile.id])}>Offene Bilder generieren</button>
                 <button className={btnCls} onClick={refreshPrompts}>Prompts aus Profil erneuern</button>
                 <select className="ml-auto bg-[#161616] border border-white/[0.08] rounded-lg px-3 py-2 text-[12px] text-gray-200 outline-none" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
                   <option value="offen">Offen</option>
@@ -879,6 +907,39 @@ export default function InfluencerManagerStudio({
 
           {view === "auto" && (
             <div className="space-y-4 max-w-2xl">
+              <div className="rounded-xl border border-white/[0.07] bg-[#121212] p-4 space-y-3">
+                <p className="text-[13px] font-semibold">Bildkosten</p>
+                <div className="grid sm:grid-cols-2 gap-2" role="radiogroup" aria-label="Bildqualität">
+                  {Object.entries(IMAGE_QUALITY).map(([id, q]) => (
+                    <button key={id} type="button" role="radio" aria-checked={settings.imageQuality === id}
+                      onClick={() => updateSettings({ imageQuality: id })}
+                      className={`text-left rounded-lg border px-3 py-2.5 transition-colors ${
+                        settings.imageQuality === id ? "border-violet-500/60 bg-violet-600/15" : "border-white/10 bg-white/[0.02] hover:bg-white/[0.05]"
+                      }`}>
+                      <span className="block text-[13px] font-semibold">{q.label} · ca. {formatUsd(q.pricePerImage)} pro Bild</span>
+                      <span className="block text-[11px] text-gray-500">{q.model}{id === "sparsam" ? " – reicht für Instagram-Auflösung" : " – feinere Details, 4× teurer"}</span>
+                    </button>
+                  ))}
+                </div>
+                <label className="flex items-start gap-3 cursor-pointer">
+                  <input id="avatar-premium" type="checkbox" className="mt-0.5 accent-violet-500" checked={settings.avatarPremium}
+                    onChange={(e) => updateSettings({ avatarPremium: e.target.checked })} />
+                  <span>
+                    <span className="block text-[12px] font-semibold">Referenzbilder immer in Premium</span>
+                    <span className="block text-[11px] text-gray-500">Wird pro Profil nur einmal erzeugt und bestimmt das Gesicht in allen Posts – lohnt sich.</span>
+                  </span>
+                </label>
+                <p className="text-[11px] text-gray-500">
+                  {(() => {
+                    const { posts, cost } = weeklyImageEstimate(state);
+                    const premium = estimateImageCost(posts, { ...settings, imageQuality: "premium" });
+                    return `Bei ${posts} Posts pro Woche: ca. ${formatUsd(cost)} pro Woche, ${formatUsd(cost * 4.3)} pro Monat`
+                      + (settings.imageQuality !== "premium" ? ` (in Premium: ${formatUsd(premium)} pro Woche).` : ".");
+                  })()}
+                  {" "}Preise laut MuAPI, Stand Oktober 2026 – abgerechnet wird der tatsächliche Betrag.
+                </p>
+              </div>
+
               <div className="rounded-xl border border-white/[0.07] bg-[#121212] p-4 space-y-3">
                 <label className="flex items-start gap-3 cursor-pointer">
                   <input id="auto-plan" type="checkbox" className="mt-0.5 accent-violet-500" checked={settings.autoPlan}

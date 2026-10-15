@@ -230,7 +230,17 @@ export function createDefaultState() {
   };
 }
 
+// Image models by cost. Prices are MuAPI's listed per-image prices as of
+// October 2026 (Nano Banana Pro $0.12, Nano Banana 2 Lite ~$0.03); they are
+// estimates for the UI only, MuAPI bills the actual amount.
+export const IMAGE_QUALITY = {
+  sparsam: { label: "Sparsam", model: "Nano Banana 2 Lite", t2i: "nano-banana-2-lite", edit: "nano-banana-2-lite-edit", pricePerImage: 0.03 },
+  premium: { label: "Premium", model: "Nano Banana Pro", t2i: "nano-banana-pro", edit: "nano-banana-pro-edit", pricePerImage: 0.12 },
+};
+
 export const DEFAULT_SETTINGS = {
+  imageQuality: "sparsam", // cheap model for everyday post images
+  avatarPremium: true,     // reference images are made once and set the face, so keep them sharp
   autoPlan: true,        // keep every profile planned ahead automatically
   planAheadDays: 7,      // how far ahead the plan should always reach
   autoImages: false,     // generating images costs MuAPI credits, so opt-in
@@ -242,6 +252,8 @@ export function sanitizeSettings(raw) {
   const s = raw && typeof raw === "object" ? raw : {};
   const log = s.imageLog && typeof s.imageLog === "object" ? s.imageLog : {};
   return {
+    imageQuality: has(IMAGE_QUALITY, s.imageQuality) ? s.imageQuality : DEFAULT_SETTINGS.imageQuality,
+    avatarPremium: typeof s.avatarPremium === "boolean" ? s.avatarPremium : DEFAULT_SETTINGS.avatarPremium,
     autoPlan: typeof s.autoPlan === "boolean" ? s.autoPlan : DEFAULT_SETTINGS.autoPlan,
     planAheadDays: Math.round(cleanNumber(s.planAheadDays, 3, 28, DEFAULT_SETTINGS.planAheadDays)),
     autoImages: s.autoImages === true,
@@ -629,4 +641,37 @@ export function removeProfile(state, profileId) {
     profiles: state.profiles.filter((p) => p.id !== profileId),
     posts: state.posts.filter((p) => p.profileId !== profileId),
   };
+}
+
+// ── Image cost ──────────────────────────────────────────────────────────────
+
+// Models to use for a purpose ("post" or "avatar") under the current settings.
+export function imageModelsFor(settings, purpose = "post") {
+  const cfg = sanitizeSettings(settings);
+  const tier = purpose === "avatar" && cfg.avatarPremium ? "premium" : cfg.imageQuality;
+  return IMAGE_QUALITY[tier];
+}
+
+export function estimateImageCost(count, settings, purpose = "post") {
+  return Math.max(0, count) * imageModelsFor(settings, purpose).pricePerImage;
+}
+
+// Rough weekly spend if every planned post gets one image.
+export function weeklyImageEstimate(state) {
+  const posts = state.profiles.reduce((sum, p) => sum + (Number(p.postsPerWeek) || 0), 0);
+  return { posts, cost: estimateImageCost(posts, state.settings) };
+}
+
+// Open posts without an image that are due within `withinDays` — the ones a
+// bulk run should cover. Later posts may still change, so they wait.
+export function bulkImageQueue(state, profileIds, now = new Date(), withinDays = 7) {
+  const limit = now.getTime() + withinDays * 86400000;
+  return state.posts
+    .filter((p) => profileIds.includes(p.profileId) && !p.imageUrl && p.status !== "gepostet"
+      && new Date(p.scheduledAt).getTime() <= limit)
+    .sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt));
+}
+
+export function formatUsd(amount) {
+  return `$${(Math.round(amount * 100) / 100).toFixed(2)}`;
 }
