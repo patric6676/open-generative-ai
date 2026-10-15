@@ -85,6 +85,7 @@ export function sanitizeProfile(raw, index) {
     pillars: cleanList(p.pillars, MAX_LIST_ITEMS, MAX_TEXT.short),
     hashtags: cleanList(p.hashtags, MAX_LIST_ITEMS, MAX_TEXT.short),
     avatarUrl: safeImageUrl(p.avatarUrl),
+    plannedUntil: cleanDate(p.plannedUntil) || "",
     followers: (Array.isArray(p.followers) ? p.followers : [])
       .filter((f) => f && typeof f.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(f.date))
       .map((f) => ({ date: f.date, count: Math.round(cleanNumber(f.count, 0, 1e10)) }))
@@ -222,6 +223,30 @@ export function createDefaultState() {
       ...p,
     })),
     posts: [],
+    settings: { ...DEFAULT_SETTINGS },
+  };
+}
+
+export const DEFAULT_SETTINGS = {
+  autoPlan: true,        // keep every profile planned ahead automatically
+  planAheadDays: 7,      // how far ahead the plan should always reach
+  autoImages: false,     // generating images costs MuAPI credits, so opt-in
+  imagesPerDay: 10,      // hard cap for automatic image generation
+  imageLog: { date: "", count: 0 },
+};
+
+export function sanitizeSettings(raw) {
+  const s = raw && typeof raw === "object" ? raw : {};
+  const log = s.imageLog && typeof s.imageLog === "object" ? s.imageLog : {};
+  return {
+    autoPlan: typeof s.autoPlan === "boolean" ? s.autoPlan : DEFAULT_SETTINGS.autoPlan,
+    planAheadDays: Math.round(cleanNumber(s.planAheadDays, 3, 28, DEFAULT_SETTINGS.planAheadDays)),
+    autoImages: s.autoImages === true,
+    imagesPerDay: Math.round(cleanNumber(s.imagesPerDay, 0, 50, DEFAULT_SETTINGS.imagesPerDay)),
+    imageLog: {
+      date: typeof log.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(log.date) ? log.date : "",
+      count: Math.round(cleanNumber(log.count, 0, 1000)),
+    },
   };
 }
 
@@ -239,7 +264,7 @@ export function parseState(raw) {
     });
     if (profiles.length === 0) return createDefaultState();
     const posts = data.posts.slice(0, MAX_POSTS).map((p) => sanitizePost(p, seen)).filter(Boolean);
-    return { version: 1, profiles, posts };
+    return { version: 1, profiles, posts, settings: sanitizeSettings(data.settings) };
   } catch {
     return createDefaultState();
   }
@@ -435,4 +460,69 @@ export function exportScheduleCsv(state) {
     ]);
   }
   return rows.map((r) => r.map(csvCell).join(",")).join("\n");
+}
+
+function startOfDay(date) {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+// Top up every profile so its plan reaches at least `planAheadDays` into the
+// future. Each profile remembers how far it is planned (`plannedUntil`), so
+// running this repeatedly never creates duplicates or overlapping weeks.
+// Returns the new posts and the updated coverage per profile.
+export function ensurePlanned(state, now = new Date(), random = Math.random) {
+  const settings = sanitizeSettings(state.settings);
+  const horizon = startOfDay(now);
+  horizon.setDate(horizon.getDate() + settings.planAheadDays);
+  const tomorrow = startOfDay(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+
+  const added = [];
+  const plannedUntil = {};
+  for (const profile of state.profiles) {
+    const insights = computeInsights(profile, state.posts);
+    // Coverage = first day that is not planned yet. Falls back to the day
+    // after the last open post for data from before `plannedUntil` existed.
+    let covered = profile.plannedUntil ? startOfDay(profile.plannedUntil) : null;
+    if (!covered) {
+      const upcoming = state.posts
+        .filter((p) => p.profileId === profile.id && p.status !== "gepostet")
+        .map((p) => +new Date(p.scheduledAt));
+      if (upcoming.length) covered = new Date(+startOfDay(Math.max(...upcoming)) + 86400000);
+    }
+    if (!covered || covered < tomorrow) covered = tomorrow;
+    // Safety cap: never plan more than 4 weeks in one go.
+    for (let week = 0; week < 4 && covered < horizon; week += 1) {
+      added.push(...planWeek(profile, covered, insights, random));
+      covered = new Date(covered);
+      covered.setDate(covered.getDate() + 7);
+    }
+    plannedUntil[profile.id] = covered.toISOString();
+  }
+  return { added, plannedUntil };
+}
+
+export function applyPlan(state, { added, plannedUntil }) {
+  return {
+    ...state,
+    posts: [...state.posts, ...added],
+    profiles: state.profiles.map((p) => (plannedUntil[p.id] ? { ...p, plannedUntil: plannedUntil[p.id] } : p)),
+  };
+}
+
+// Posts that should get an image automatically now: open, no image yet,
+// due within `withinDays`, soonest first, limited by today's remaining quota.
+export function pickAutoImageQueue(state, now = new Date(), withinDays = 2) {
+  const settings = sanitizeSettings(state.settings);
+  if (!settings.autoImages) return [];
+  const today = now.toISOString().slice(0, 10);
+  const used = settings.imageLog.date === today ? settings.imageLog.count : 0;
+  const remaining = Math.max(0, settings.imagesPerDay - used);
+  const limit = new Date(now.getTime() + withinDays * 86400000);
+  return state.posts
+    .filter((p) => p.status === "idee" && !p.imageUrl && new Date(p.scheduledAt) <= limit && new Date(p.scheduledAt) >= now)
+    .sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt))
+    .slice(0, remaining);
 }
