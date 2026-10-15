@@ -246,3 +246,56 @@ test('exported posts become posted once their time has passed', async () => {
     assert.equal(changed, 1);
     assert.deepEqual(next.posts.map((p) => p.status), ['gepostet', 'freigegeben', 'freigegeben']);
 });
+
+const randomizerPath = pathToFileURL(path.join(__dirname, '../packages/studio/src/promptRandomizer.js')).href;
+const loadRandomizer = () => import(randomizerPath);
+
+test('randomizer: every prompt names an adult aged 20-25', async () => {
+    const { generateBatch } = await loadRandomizer();
+    const batch = generateBatch(20, null, [], seeded(7));
+    assert.equal(batch.length, 20);
+    for (const { traits, prompt, appearance } of batch) {
+        assert.ok(traits.age >= 20 && traits.age <= 25, `age ${traits.age}`);
+        assert.match(prompt, new RegExp(`^Instagram photo of a ${traits.age}-year-old adult `));
+        assert.match(appearance, new RegExp(`^${traits.age} year old adult `));
+    }
+    assert.equal(new Set(batch.map((b) => b.prompt)).size, 20, 'prompts are distinct');
+});
+
+test('randomizer: option lists stay Instagram-safe', async () => {
+    const { OPTIONS } = await loadRandomizer();
+    const banned = /\b(girl|teen|teenage|young-looking|child|kid|school|lingerie|underwear|nude|naked|topless|sexy|bikini)\b/i;
+    const values = Object.entries(OPTIONS).flatMap(([key, list]) => (Array.isArray(list)
+        ? list.map((v) => [key, v])
+        : Object.entries(list).flatMap(([style, outfits]) => [[key, style], ...outfits.map((o) => [style, o])])));
+    assert.ok(values.length > 100);
+    for (const [key, value] of values) assert.doesNotMatch(value, banned, `${key}: ${value}`);
+});
+
+test('randomizer: locked groups are kept, others change', async () => {
+    const { generateBatch, GROUPS, randomizeTraits } = await loadRandomizer();
+    const batch = generateBatch(8, null, ['person'], seeded(3));
+    const first = batch[0].traits;
+    for (const { traits } of batch) {
+        for (const key of GROUPS.person.keys) assert.equal(traits[key], first[key], key);
+    }
+    assert.ok(new Set(batch.map((b) => b.traits.location + b.traits.outfit)).size > 1, 'scenes vary');
+    // A tampered previous age is clamped back into range.
+    assert.equal(randomizeTraits({ ...first, age: 15 }, ['person'], seeded()).age, 20);
+    assert.equal(randomizeTraits({ ...first, age: 40 }, ['person'], seeded()).age, 25);
+});
+
+test('randomizer: outfits always match the chosen style', async () => {
+    const { generateBatch, OPTIONS } = await loadRandomizer();
+    for (const { traits } of generateBatch(20, null, [], seeded(11))) {
+        assert.ok(OPTIONS.outfitsByAesthetic[traits.aesthetic].includes(traits.outfit), `${traits.aesthetic} / ${traits.outfit}`);
+    }
+});
+
+test('randomizer: night locations get night light', async () => {
+    const { generateBatch, OPTIONS } = await loadRandomizer();
+    for (const { traits } of generateBatch(20, null, [], seeded(5)).concat(generateBatch(20, null, [], seeded(9)))) {
+        const night = traits.location.includes('at night');
+        assert.ok((night ? OPTIONS.nightLight : OPTIONS.light).includes(traits.light), `${traits.location} / ${traits.light}`);
+    }
+});
