@@ -345,3 +345,44 @@ test('removeProfile drops its posts and keeps at least one profile', async () =>
     const single = { ...state, profiles: [state.profiles[0]] };
     assert.equal(removeProfile(single, 'profile_1'), single);
 });
+
+test('glamour: adult 20-25, tasteful, outfits and locations match the theme', async () => {
+    const { generateBatch, GLAMOUR } = await loadRandomizer();
+    const batch = generateBatch(20, null, [], seeded(21), 'glamour');
+    assert.equal(batch.length, 20);
+    for (const { traits, prompt } of batch) {
+        assert.equal(traits.mode, 'glamour');
+        assert.ok(traits.age >= 20 && traits.age <= 25);
+        assert.match(prompt, new RegExp(`^Instagram fashion photo of a ${traits.age}-year-old adult `));
+        assert.match(prompt, /tasteful and elegant, Instagram-appropriate/);
+        const theme = GLAMOUR.themes[traits.aesthetic];
+        assert.ok(theme, traits.aesthetic);
+        assert.ok(theme.outfits.includes(traits.outfit), `${traits.aesthetic} / ${traits.outfit}`);
+        assert.ok(theme.locations.includes(traits.location), `${traits.aesthetic} / ${traits.location}`);
+        const night = / at night$/.test(traits.location);
+        assert.ok((night ? GLAMOUR.nightLight : theme.light || GLAMOUR.light).includes(traits.light), `${traits.location} / ${traits.light}`);
+    }
+});
+
+test('glamour: vocabulary stays Instagram-safe', async () => {
+    const { GLAMOUR } = await loadRandomizer();
+    const banned = /\b(girl|teen|teenage|young-looking|child|kid|school|lingerie|underwear|nude|naked|topless|sexy|seductive|sensual|revealing|see-through|sheer|cleavage|thong|braless|wet)\b/i;
+    const values = [
+        ...Object.entries(GLAMOUR.themes).flatMap(([theme, t]) => [theme, ...t.outfits, ...t.locations, ...(t.light || [])]),
+        ...GLAMOUR.activity, ...GLAMOUR.shot, ...GLAMOUR.light, ...GLAMOUR.nightLight, ...GLAMOUR.camera,
+    ];
+    assert.ok(values.length > 40);
+    for (const v of values) assert.doesNotMatch(v, banned, v);
+});
+
+test('switching modes keeps a locked person but not an everyday look', async () => {
+    const { generateBatch, GROUPS, GLAMOUR } = await loadRandomizer();
+    const [everyday] = generateBatch(1, null, [], seeded(2), 'alltag');
+    const glam = generateBatch(5, everyday.traits, ['person', 'look', 'scene', 'camera'], seeded(4), 'glamour');
+    for (const { traits } of glam) {
+        for (const key of GROUPS.person.keys) assert.equal(traits[key], everyday.traits[key], key);
+        assert.ok(GLAMOUR.themes[traits.aesthetic], 'look switched to a glamour theme');
+    }
+    // Within glamour, the locked look/scene now stays fixed across the batch.
+    assert.equal(new Set(glam.map((g) => g.traits.outfit + g.traits.location)).size, 1);
+});
