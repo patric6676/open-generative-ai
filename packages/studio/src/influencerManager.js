@@ -19,6 +19,102 @@ export const POST_STATUS = ["idee", "bild", "freigegeben", "gepostet"];
 
 export const AI_DISCLOSURE = "🤖 KI-generierter Charakter";
 
+export const TONES = ["motivierend", "neugierig", "witzig", "herzlich", "selbstbewusst"];
+
+// Limits for anything that comes from a backup file or user input.
+export const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
+const MAX_POSTS = 2000;
+const MAX_FOLLOWER_ENTRIES = 1000;
+const MAX_LIST_ITEMS = 30;
+const MAX_TEXT = { short: 80, medium: 300, long: 3000 };
+
+const has = (obj, key) => typeof key === "string" && Object.prototype.hasOwnProperty.call(obj, key);
+
+function cleanText(value, max) {
+  if (typeof value !== "string") return "";
+  // Drop control characters except newline and tab.
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, "").slice(0, max);
+}
+
+function cleanList(value, maxItems, maxLen) {
+  if (!Array.isArray(value)) return [];
+  return value.map((v) => cleanText(v, maxLen).trim()).filter(Boolean).slice(0, maxItems);
+}
+
+function cleanNumber(value, min, max, fallback = 0) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+// Only https image URLs are rendered, fetched or sent to the image API.
+export function safeImageUrl(value) {
+  if (typeof value !== "string" || value.length > 2048) return "";
+  try {
+    const url = new URL(value.trim());
+    if (url.protocol !== "https:" || url.username || url.password) return "";
+    return url.href;
+  } catch {
+    return "";
+  }
+}
+
+function cleanId(value, fallback) {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value) ? value : fallback;
+}
+
+function cleanDate(value) {
+  const d = new Date(typeof value === "string" ? value : NaN);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+export function sanitizeProfile(raw, index) {
+  const p = raw && typeof raw === "object" ? raw : {};
+  const platforms = cleanList(p.platforms, 10, 20).filter((id) => has(PLATFORMS, id));
+  return {
+    id: cleanId(p.id, `profile_${index + 1}`),
+    name: cleanText(p.name, MAX_TEXT.short) || `Profil ${index + 1}`,
+    handle: cleanText(p.handle, MAX_TEXT.short),
+    niche: cleanText(p.niche, MAX_TEXT.short),
+    appearance: cleanText(p.appearance, MAX_TEXT.medium),
+    tone: TONES.includes(p.tone) ? p.tone : TONES[0],
+    audience: cleanText(p.audience, MAX_TEXT.medium),
+    platforms: [...new Set(platforms)],
+    postsPerWeek: Math.round(cleanNumber(p.postsPerWeek, 1, 14, 3)),
+    pillars: cleanList(p.pillars, MAX_LIST_ITEMS, MAX_TEXT.short),
+    hashtags: cleanList(p.hashtags, MAX_LIST_ITEMS, MAX_TEXT.short),
+    avatarUrl: safeImageUrl(p.avatarUrl),
+    followers: (Array.isArray(p.followers) ? p.followers : [])
+      .filter((f) => f && typeof f.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(f.date))
+      .map((f) => ({ date: f.date, count: Math.round(cleanNumber(f.count, 0, 1e10)) }))
+      .slice(-MAX_FOLLOWER_ENTRIES),
+  };
+}
+
+export function sanitizePost(raw, profileIds) {
+  const p = raw && typeof raw === "object" ? raw : null;
+  if (!p || !profileIds.has(p.profileId)) return null;
+  const scheduledAt = cleanDate(p.scheduledAt);
+  if (!scheduledAt) return null;
+  const m = p.metrics && typeof p.metrics === "object" ? p.metrics : null;
+  return {
+    id: cleanId(p.id, makeId("post")),
+    profileId: p.profileId,
+    platform: has(PLATFORMS, p.platform) ? p.platform : "instagram",
+    format: FORMATS.includes(p.format) ? p.format : FORMATS[0],
+    pillar: cleanText(p.pillar, MAX_TEXT.short) || "Allgemein",
+    scene: cleanText(p.scene, MAX_TEXT.medium),
+    scheduledAt,
+    status: POST_STATUS.includes(p.status) ? p.status : "idee",
+    imageUrl: safeImageUrl(p.imageUrl),
+    prompt: cleanText(p.prompt, MAX_TEXT.long),
+    caption: cleanText(p.caption, MAX_TEXT.long),
+    metrics: m ? Object.fromEntries(["reach", "likes", "comments", "shares", "saves"]
+      .map((k) => [k, Math.round(cleanNumber(m[k], 0, 1e12))])) : null,
+  };
+}
+
 const DEFAULT_PROFILES = [
   {
     name: "Lena Fit",
@@ -134,11 +230,16 @@ export function parseState(raw) {
   try {
     const data = typeof raw === "string" ? JSON.parse(raw) : raw;
     if (!data || !Array.isArray(data.profiles) || !Array.isArray(data.posts)) return createDefaultState();
-    return {
-      version: 1,
-      profiles: data.profiles.slice(0, MAX_PROFILES),
-      posts: data.posts,
-    };
+    const profiles = data.profiles.slice(0, MAX_PROFILES).map(sanitizeProfile);
+    // Duplicate ids would make two profiles share one plan.
+    const seen = new Set();
+    profiles.forEach((p, i) => {
+      if (seen.has(p.id)) p.id = `profile_${i + 1}_${makeId("dup")}`.slice(0, 64);
+      seen.add(p.id);
+    });
+    if (profiles.length === 0) return createDefaultState();
+    const posts = data.posts.slice(0, MAX_POSTS).map((p) => sanitizePost(p, seen)).filter(Boolean);
+    return { version: 1, profiles, posts };
   } catch {
     return createDefaultState();
   }
@@ -162,8 +263,8 @@ export function pickPostingDays(count, startDate) {
 // Best hour per platform, nudged by the profile's own engagement history.
 export function bestHourFor(platform, insights) {
   const learned = insights?.bestHourByPlatform?.[platform];
-  if (learned !== undefined) return learned;
-  return PLATFORMS[platform]?.bestHours?.[0] ?? 18;
+  if (Number.isInteger(learned) && learned >= 0 && learned <= 23) return learned;
+  return has(PLATFORMS, platform) ? PLATFORMS[platform].bestHours[0] : 18;
 }
 
 export function buildImagePrompt(profile, post) {
@@ -176,9 +277,9 @@ export function buildImagePrompt(profile, post) {
 }
 
 export function buildCaption(profile, post, random = Math.random) {
-  const hooks = HOOKS[profile.tone] || HOOKS.motivierend;
-  const ctas = CTAS[post.format] || CTAS.Foto;
-  const maxTags = PLATFORMS[post.platform]?.maxHashtags ?? 5;
+  const hooks = has(HOOKS, profile.tone) ? HOOKS[profile.tone] : HOOKS.motivierend;
+  const ctas = has(CTAS, post.format) ? CTAS[post.format] : CTAS.Foto;
+  const maxTags = has(PLATFORMS, post.platform) ? PLATFORMS[post.platform].maxHashtags : 5;
   const pillarTag = `#${post.pillar.toLowerCase().replace(/[^a-z0-9äöüß]/g, "")}`;
   const tags = [...new Set([pillarTag, ...(profile.hashtags || [])])].slice(0, maxTags);
   return [
@@ -194,7 +295,7 @@ export function buildCaption(profile, post, random = Math.random) {
 // Choose pillars for the week, weighting toward the ones that performed best.
 export function weightedPillars(profile, insights, count, random = Math.random) {
   const pillars = profile.pillars?.length ? profile.pillars : ["Allgemein"];
-  const scores = pillars.map((p) => 1 + (insights?.pillarScore?.[p] ?? 0));
+  const scores = pillars.map((p) => 1 + (has(insights?.pillarScore || {}, p) ? insights.pillarScore[p] : 0));
   const total = scores.reduce((a, b) => a + b, 0);
   const result = [];
   for (let i = 0; i < count; i += 1) {
@@ -256,22 +357,22 @@ export function computeInsights(profile, posts) {
   const totalReach = mine.reduce((s, p) => s + (Number(p.metrics.reach) || 0), 0);
   const avgEngagement = mine.length ? mine.reduce((s, p) => s + engagementRate(p.metrics), 0) / mine.length : 0;
 
-  const byPillar = {};
-  const byHour = {};
+  const byPillar = Object.create(null);
+  const byHour = Object.create(null);
   for (const p of mine) {
     const er = engagementRate(p.metrics);
     (byPillar[p.pillar] ||= []).push(er);
     const hour = new Date(p.scheduledAt).getHours();
-    ((byHour[p.platform] ||= {})[hour] ||= []).push(er);
+    ((byHour[p.platform] ||= Object.create(null))[hour] ||= []).push(er);
   }
   const avg = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
 
-  const pillarScore = {};
+  const pillarScore = Object.create(null);
   for (const [pillar, ers] of Object.entries(byPillar)) {
     pillarScore[pillar] = avgEngagement > 0 ? Math.max(0, avg(ers) / avgEngagement - 1) * 2 : 0;
   }
 
-  const bestHourByPlatform = {};
+  const bestHourByPlatform = Object.create(null);
   for (const [platform, hours] of Object.entries(byHour)) {
     const [bestHour] = Object.entries(hours).sort((a, b) => avg(b[1]) - avg(a[1]))[0];
     bestHourByPlatform[platform] = Number(bestHour);
@@ -304,24 +405,27 @@ export function computeInsights(profile, posts) {
 }
 
 function csvCell(value) {
-  const s = String(value ?? "");
+  let s = String(value ?? "");
+  // Neutralise spreadsheet formulas (=, +, -, @, tab, CR) so Excel/Sheets
+  // never execute a cell from an imported caption.
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
 // Generic CSV for scheduling tools (Buffer, Later, Meta Business Suite bulk upload).
 export function exportScheduleCsv(state) {
-  const byId = Object.fromEntries(state.profiles.map((p) => [p.id, p]));
+  const byId = new Map(state.profiles.map((p) => [p.id, p]));
   const rows = [["profil", "handle", "plattform", "format", "datum", "uhrzeit", "status", "bild_url", "caption"]];
   const sorted = [...state.posts].sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt));
   for (const post of sorted) {
-    const profile = byId[post.profileId];
+    const profile = byId.get(post.profileId);
     if (!profile) continue;
     const d = new Date(post.scheduledAt);
     const pad = (n) => String(n).padStart(2, "0");
     rows.push([
       profile.name,
       profile.handle,
-      PLATFORMS[post.platform]?.label || post.platform,
+      has(PLATFORMS, post.platform) ? PLATFORMS[post.platform].label : post.platform,
       post.format,
       `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
       `${pad(d.getHours())}:${pad(d.getMinutes())}`,
