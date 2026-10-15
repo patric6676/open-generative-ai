@@ -163,8 +163,8 @@ function PostCard({ post, profile, busy, onUpdate, onGenerate, onDelete }) {
   const er = engagementRate(post.metrics);
 
   return (
-    <div className="rounded-xl border border-white/[0.07] bg-[#121212] p-3 flex gap-3">
-      <div className="w-28 shrink-0">
+    <div className="rounded-xl border border-white/[0.07] bg-[#121212] p-3 flex flex-col sm:flex-row gap-3">
+      <div className="w-full max-w-[160px] sm:w-28 shrink-0">
         <div className="aspect-[4/5] rounded-lg overflow-hidden bg-[#1a1a1a] border border-white/[0.06] flex items-center justify-center">
           {busy ? (
             <div className="w-6 h-6 border-2 border-violet-500/20 border-t-violet-500 rounded-full animate-spin" />
@@ -211,7 +211,7 @@ function PostCard({ post, profile, busy, onUpdate, onGenerate, onDelete }) {
         </details>
 
         {post.status === "gepostet" && (
-          <div className="grid grid-cols-5 gap-1.5">
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
             {["reach", "likes", "comments", "shares", "saves"].map((k) => (
               <label key={k} className="block">
                 <span className="block text-[9px] uppercase text-gray-600 font-bold">
@@ -220,7 +220,7 @@ function PostCard({ post, profile, busy, onUpdate, onGenerate, onDelete }) {
                 <input type="number" min={0} className={inputCls + " py-1"} value={post.metrics?.[k] ?? ""} onChange={setMetric(k)} />
               </label>
             ))}
-            <p className="col-span-5 text-[11px] text-gray-500">Engagement: <span className="text-white font-semibold">{(er * 100).toFixed(1)} %</span></p>
+            <p className="col-span-2 sm:col-span-5 text-[11px] text-gray-500">Engagement: <span className="text-white font-semibold">{(er * 100).toFixed(1)} %</span></p>
           </div>
         )}
 
@@ -410,20 +410,20 @@ export default function InfluencerManagerStudio({
   const dueToday = state.posts.filter((p) => p.status === "freigegeben" && new Date(p.scheduledAt) <= new Date());
 
   return (
-    <div className="h-full w-full flex bg-[#0b0b0b] text-white overflow-hidden">
+    <div className="h-full w-full flex flex-col md:flex-row bg-[#0b0b0b] text-white overflow-hidden">
       {/* Profiles sidebar */}
-      <aside className="w-[220px] shrink-0 border-r border-white/[0.07] bg-[#101010] flex flex-col">
+      <aside className="w-full md:w-[220px] shrink-0 border-b md:border-b-0 md:border-r border-white/[0.07] bg-[#101010] flex flex-col max-h-[45%] md:max-h-none">
         <div className="px-4 py-4 border-b border-white/[0.07]">
           <p className="text-[13px] font-bold">Influencer Manager</p>
           <p className="text-[10px] text-gray-500 mt-0.5">5 KI-Profile · Plan · Reichweite</p>
         </div>
-        <div className="flex-1 overflow-y-auto p-2 space-y-1">
+        <div className="md:flex-1 flex md:block gap-1 overflow-x-auto md:overflow-y-auto p-2 md:space-y-1">
           {state.profiles.map((p) => {
             const ins = insightsById[p.id];
             const open = state.posts.filter((x) => x.profileId === p.id && x.status !== "gepostet").length;
             return (
               <button key={p.id} type="button" onClick={() => setActiveId(p.id)}
-                className={`w-full flex items-center gap-2.5 p-2 rounded-xl text-left transition-colors ${
+                className={`min-w-[170px] md:min-w-0 w-full flex items-center gap-2.5 p-2 rounded-xl text-left transition-colors ${
                   p.id === profile.id ? "bg-violet-600/20 border border-violet-500/40" : "border border-transparent hover:bg-white/[0.04]"
                 }`}>
                 <div className="w-10 h-10 rounded-full overflow-hidden bg-[#1c1c1c] shrink-0 flex items-center justify-center text-[13px] font-bold text-gray-500">
@@ -438,11 +438,11 @@ export default function InfluencerManagerStudio({
             );
           })}
         </div>
-        <div className="p-3 border-t border-white/[0.07] space-y-1.5">
+        <div className="p-3 border-t border-white/[0.07] grid grid-cols-2 md:grid-cols-1 gap-1.5">
           <button className={primaryBtnCls + " w-full"} onClick={() => createWeekPlan(allIds)}>Wochenplan für alle</button>
           <button className={btnCls + " w-full"} disabled={Object.keys(busyIds).length > 0} onClick={() => generateAllOpen(allIds)}>Alle Bilder generieren</button>
           <button className={btnCls + " w-full"} onClick={() => downloadText(`content-plan_${new Date().toISOString().slice(0, 10)}.csv`, exportScheduleCsv(state), "text/csv;charset=utf-8")}>Plan als CSV</button>
-          <div className="flex gap-1.5">
+          <div className="flex gap-1.5 col-span-2 md:col-span-1">
             <button className={btnCls + " flex-1"} onClick={() => downloadText("influencer-backup.json", JSON.stringify(state, null, 2), "application/json")}>Backup</button>
             <button className={btnCls + " flex-1"} onClick={() => importRef.current?.click()}>Import</button>
             <input ref={importRef} type="file" accept="application/json" className="hidden"
@@ -452,8 +452,8 @@ export default function InfluencerManagerStudio({
       </aside>
 
       {/* Main */}
-      <main className="flex-1 min-w-0 flex flex-col">
-        <div className="flex items-center gap-1 px-6 pt-4 pb-3 border-b border-white/[0.07] shrink-0">
+      <main className="flex-1 min-w-0 min-h-0 flex flex-col">
+        <div className="flex flex-wrap items-center gap-1 px-4 md:px-6 pt-4 pb-3 border-b border-white/[0.07] shrink-0">
           {[["plan", "Content-Plan"], ["profil", "Profil"], ["analytics", "Reichweite"], ["overview", "Übersicht"]].map(([id, label]) => (
             <button key={id} type="button" onClick={() => setView(id)}
               className={`px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-colors ${view === id ? "bg-white/10 text-white" : "text-gray-500 hover:text-gray-300"}`}>
@@ -465,7 +465,7 @@ export default function InfluencerManagerStudio({
           )}
         </div>
 
-        <div className="flex-1 overflow-y-auto p-6">
+        <div className="flex-1 overflow-y-auto p-4 md:p-6">
           {view === "profil" && (
             <ProfileTab profile={profile} onChange={updateProfile} busy={!!busyIds[`avatar_${profile.id}`]} onGenerateAvatar={() => generateAvatar(profile)} />
           )}
