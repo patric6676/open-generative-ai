@@ -21,8 +21,47 @@ function addSecurityHeaders(response) {
     return response;
 }
 
+// Optional access lock: when APP_PASSWORD is set, every page and API route
+// requires HTTP Basic Auth, so a deployed instance (and the MuAPI credits
+// behind it) can't be used by anyone who merely finds the URL.
+function timingSafeEqual(a, b) {
+    let diff = a.length ^ b.length;
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+        diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+    }
+    return diff === 0;
+}
+
+function isAuthorized(request, password) {
+    const header = request.headers.get('authorization') || '';
+    if (!header.startsWith('Basic ')) return false;
+    let decoded;
+    try {
+        decoded = atob(header.slice(6).trim());
+    } catch {
+        return false;
+    }
+    const user = process.env.APP_USER || 'admin';
+    const sep = decoded.indexOf(':');
+    if (sep < 0) return false;
+    return timingSafeEqual(decoded.slice(0, sep), user) && timingSafeEqual(decoded.slice(sep + 1), password);
+}
+
+function unauthorized() {
+    const response = new NextResponse('Authentication required', {
+        status: 401,
+        headers: { 'WWW-Authenticate': 'Basic realm="Open Generative AI", charset="UTF-8"' },
+    });
+    return addSecurityHeaders(response);
+}
+
 export function middleware(request) {
     const url = request.nextUrl;
+
+    const password = process.env.APP_PASSWORD;
+    if (password && !isAuthorized(request, password)) {
+        return unauthorized();
+    }
 
     // Catch requests to /api/workflow, /api/app, and /api/v1
     const isMuApi = url.pathname.startsWith('/api/workflow') ||

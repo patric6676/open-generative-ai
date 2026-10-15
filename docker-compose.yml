@@ -3,7 +3,13 @@ services:
     build: .
     container_name: open-generative-ai
     ports:
-      - "3001:3000"
+      # Only reachable from this machine. Put a reverse proxy with HTTPS in
+      # front (and set APP_PASSWORD) before exposing it to a network.
+      - "127.0.0.1:3001:3000"
     environment:
       - NODE_ENV=production
+      # Set APP_PASSWORD in a .env file next to this compose file to require
+      # a login (user: APP_USER, default "admin") for the whole app.
+      - APP_USER=${APP_USER:-admin}
+      - APP_PASSWORD=${APP_PASSWORD:-}
     restart: unless-stopped
