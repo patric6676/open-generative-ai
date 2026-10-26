@@ -453,3 +453,93 @@ test('caption hooks fit every niche and never repeat within a week', async () =>
         }
     }
 });
+
+test('premiumPackFor creates three distinct items per profile and never repeats a title', async () => {
+    const { createDefaultState, premiumPackFor } = await load();
+    const profile = createDefaultState().profiles[0];
+    const first = premiumPackFor(profile, []);
+    assert.equal(first.length, 3);
+    assert.equal(new Set(first.map((p) => p.title)).size, 3);
+    const second = premiumPackFor(profile, first);
+    assert.equal(second.length, 3);
+    const titles = new Set(first.map((p) => p.title));
+    for (const item of second) assert.ok(!titles.has(item.title), item.title);
+    for (const item of [...first, ...second]) {
+        assert.equal(item.profileId, profile.id);
+        assert.equal(item.status, 'entwurf');
+        assert.ok(item.outline.length >= 4);
+    }
+});
+
+test('premium image prompts keep the face, name an adult and stay non-sexual', async () => {
+    const { createDefaultState, premiumPackFor, PREMIUM_TYPES, createPremiumItem } = await load();
+    const state = createDefaultState();
+    const banned = /\b(nude|naked|lingerie|underwear|sexy|seductive|cleavage|bikini|bed|bedroom|erotic|nsfw|teen|young girl)\b/i;
+    for (const profile of state.profiles) {
+        const items = Object.keys(PREMIUM_TYPES).map((t) => createPremiumItem(profile, t, profile.pillars[0]));
+        for (const item of [...items, ...premiumPackFor(profile, [])]) {
+            assert.ok(item.prompt.includes(profile.appearance), 'appearance verbatim');
+            assert.match(item.prompt, /\badult\b/i);
+            assert.doesNotMatch(item.prompt, banned);
+            assert.doesNotMatch(item.prompt, /\b(her|his)\b/, 'scenes stay pronoun-neutral');
+            assert.match(item.prompt, /4:5$/);
+        }
+    }
+});
+
+test('premium teaser post links to the subscription and keeps the AI disclosure', async () => {
+    const { createDefaultState, premiumPackFor, premiumTeaserPost, PREMIUM_TEASER, AI_DISCLOSURE, sanitizePost } = await load();
+    const profile = createDefaultState().profiles[3];
+    const [item] = premiumPackFor(profile, []);
+    const post = premiumTeaserPost(profile, { ...item, imageUrl: 'https://cdn.example.com/a.png' }, '2026-11-02T18:00:00.000Z');
+    assert.equal(post.pillar, 'Premium');
+    assert.equal(post.status, 'bild');
+    assert.equal(post.scheduledAt, '2026-11-02T18:00:00.000Z');
+    assert.ok(post.caption.includes(item.title));
+    assert.ok(post.caption.includes(PREMIUM_TEASER));
+    assert.ok(post.caption.trim().endsWith(AI_DISCLOSURE));
+    assert.ok(sanitizePost(post, new Set([profile.id])), 'teaser is a valid post');
+    const later = premiumTeaserPost(profile, item);
+    assert.ok(new Date(later.scheduledAt) > new Date(), 'defaults to a future time');
+    assert.equal(later.status, 'idee');
+});
+
+test('parseState keeps valid premium items and drops hostile ones', async () => {
+    const { createDefaultState, premiumPackFor, parseState } = await load();
+    const state = createDefaultState();
+    const [item] = premiumPackFor(state.profiles[0], []);
+    state.premium = [
+        { ...item, imageUrl: 'javascript:alert(1)' },
+        { ...item, id: 'other', profileId: 'ghost' },
+        { ...item, id: 'x2', type: '__proto__', status: 'hacked', outline: Array(50).fill('a'), title: 'T'.repeat(5000) },
+        'garbage',
+    ];
+    const parsed = parseState(JSON.stringify(state));
+    assert.equal(parsed.premium.length, 2);
+    assert.equal(parsed.premium[0].imageUrl, '');
+    const odd = parsed.premium[1];
+    assert.equal(odd.type, 'guide');
+    assert.equal(odd.status, 'entwurf');
+    assert.equal(odd.outline.length, 12);
+    assert.ok(odd.title.length <= 300);
+    assert.deepEqual(parseState({ profiles: state.profiles, posts: [] }).premium, []);
+});
+
+test('removeProfile also removes that profile\'s premium items', async () => {
+    const { createDefaultState, premiumPackFor, removeProfile } = await load();
+    const state = createDefaultState();
+    state.premium = [...premiumPackFor(state.profiles[0], []), ...premiumPackFor(state.profiles[1], [])];
+    const next = removeProfile(state, state.profiles[0].id);
+    assert.equal(next.premium.length, 3);
+    assert.ok(next.premium.every((p) => p.profileId === state.profiles[1].id));
+});
+
+test('premiumText is ready to paste with numbered chapters and the AI disclosure', async () => {
+    const { createDefaultState, premiumPackFor, premiumText, AI_DISCLOSURE } = await load();
+    const profile = createDefaultState().profiles[0];
+    const [item] = premiumPackFor(profile, []);
+    const text = premiumText(profile, item);
+    assert.ok(text.startsWith(item.title));
+    assert.match(text, /\n1\. /);
+    assert.ok(text.trim().endsWith(AI_DISCLOSURE));
+});

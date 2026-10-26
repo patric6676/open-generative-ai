@@ -42,6 +42,12 @@ import {
   removeProfile,
   makeId,
   bestHourFor,
+  PREMIUM_TYPES,
+  PREMIUM_STATUS,
+  premiumPackFor,
+  premiumTeaserPost,
+  premiumText,
+  buildPremiumImagePrompt,
 } from "../influencerManager.js";
 import { generateBatch, GROUPS, MODES } from "../promptRandomizer.js";
 
@@ -403,6 +409,60 @@ function RandomizerTab({ profile, busyIds, onGenerate, onUseAppearance, onAddToP
   );
 }
 
+// ─── Premium content for subscribers ────────────────────────────────────────
+const PREMIUM_STATUS_LABEL = { entwurf: "Entwurf", fertig: "Fertig", "veröffentlicht": "Veröffentlicht" };
+
+function PremiumCard({ item, busy, onUpdate, onGenerate, onTeaser, onCopy, onDelete }) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const image = safeImageUrl(item.imageUrl);
+  return (
+    <div className="rounded-xl border border-amber-500/20 bg-[#121212] p-3 flex flex-col sm:flex-row gap-3">
+      <div className="w-full max-w-[160px] sm:w-28 shrink-0">
+        <div className="aspect-[4/5] rounded-lg overflow-hidden bg-[#1a1a1a] border border-white/[0.06] flex items-center justify-center">
+          {busy ? (
+            <div className="w-6 h-6 border-2 border-amber-500/20 border-t-amber-400 rounded-full animate-spin" />
+          ) : image ? (
+            <img src={image} alt={item.title} referrerPolicy="no-referrer" className="w-full h-full object-cover" />
+          ) : (
+            <span className="text-[10px] text-gray-600">kein Bild</span>
+          )}
+        </div>
+        <button className={btnCls + " w-full mt-1"} disabled={busy} onClick={onGenerate}>{image ? "Neues Bild" : "Bild (Premium)"}</button>
+      </div>
+      <div className="flex-1 min-w-0 space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-amber-300">🔒 {PREMIUM_TYPES[item.type]?.label || "Premium"}</span>
+          <span className="text-[10px] text-gray-500">{item.pillar}</span>
+          <select className="ml-auto bg-[#161616] border border-white/[0.08] rounded-lg px-2 py-1 text-[11px] text-gray-200 outline-none"
+            value={item.status} onChange={(e) => onUpdate({ status: e.target.value })} aria-label="Status">
+            {PREMIUM_STATUS.map((st) => <option key={st} value={st}>{PREMIUM_STATUS_LABEL[st]}</option>)}
+          </select>
+        </div>
+        <input className={inputCls + " font-semibold"} value={item.title} onChange={(e) => onUpdate({ title: e.target.value })} aria-label="Titel" />
+        <textarea className={inputCls + " min-h-[60px]"} value={item.description} onChange={(e) => onUpdate({ description: e.target.value })} aria-label="Beschreibung" />
+        <textarea className={inputCls + " min-h-[90px]"} value={item.outline.join("\n")}
+          onChange={(e) => onUpdate({ outline: e.target.value.split("\n").slice(0, 12) })} aria-label="Inhalt (eine Zeile pro Kapitel)" />
+        <details className="text-[11px] text-gray-500">
+          <summary className="cursor-pointer select-none">Bild-Prompt</summary>
+          <textarea className={inputCls + " min-h-[80px] mt-1"} value={item.prompt} onChange={(e) => onUpdate({ prompt: e.target.value })} />
+        </details>
+        <div className="flex flex-wrap gap-1.5">
+          <button className={btnCls} onClick={onTeaser}>Teaser in Content-Plan</button>
+          <button className={btnCls} onClick={onCopy}>Text kopieren</button>
+          {confirmDelete ? (
+            <>
+              <button className={btnCls + " text-red-300"} onClick={onDelete}>Wirklich löschen</button>
+              <button className={btnCls} onClick={() => setConfirmDelete(false)}>Abbrechen</button>
+            </>
+          ) : (
+            <button className={btnCls + " text-red-300"} onClick={() => setConfirmDelete(true)}>Löschen</button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main component ─────────────────────────────────────────────────────────
 export default function InfluencerManagerStudio({
   apiKey,
@@ -467,6 +527,54 @@ export default function InfluencerManagerStudio({
     setState((s) => ({ ...s, posts: s.posts.map((p) => (p.id === id ? { ...p, ...patch } : p)) }));
 
   const deletePost = (id) => setState((s) => ({ ...s, posts: s.posts.filter((p) => p.id !== id) }));
+
+  const premiumItems = (state.premium || []).filter((p) => p.profileId === profile.id)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+  const updatePremium = (id, patch) =>
+    setState((s) => ({ ...s, premium: (s.premium || []).map((p) => (p.id === id ? { ...p, ...patch } : p)) }));
+
+  const deletePremium = (id) => setState((s) => ({ ...s, premium: (s.premium || []).filter((p) => p.id !== id) }));
+
+  const createPremiumPacks = (profileIds) => {
+    const premium = [...(state.premium || [])];
+    for (const p of state.profiles.filter((x) => profileIds.includes(x.id))) premium.push(...premiumPackFor(p, premium));
+    const added = premium.length - (state.premium || []).length;
+    if (added === 0) { toast("Alle Kombinationen aus Themen und Formaten sind schon angelegt."); return; }
+    setState((s) => ({ ...s, premium: [...(s.premium || []), ...premium.slice((state.premium || []).length)] }));
+    toast.success(`${added} Premium-Ideen erstellt`);
+    setView("premium");
+  };
+
+  // Premium images always use the best model; with a reference avatar the
+  // edit model keeps the face identical to the public feed.
+  const generatePremiumImage = async (item) => {
+    if (!requireKey()) return;
+    const owner = stateRef.current.profiles.find((p) => p.id === item.profileId);
+    const reference = safeImageUrl(owner?.avatarUrl);
+    const models = IMAGE_QUALITY.premium;
+    const prompt = item.prompt || buildPremiumImagePrompt(owner, item);
+    const url = await runGeneration(item.id, () => (reference
+      ? generateI2I(apiKey, { model: models.edit, images_list: [reference], prompt: `Same person as in the reference image, identical face. ${prompt}`, aspect_ratio: "4:5" })
+      : generateImage(apiKey, { model: models.t2i, prompt, aspect_ratio: "4:5" })));
+    if (url) updatePremium(item.id, { imageUrl: url, status: item.status === "entwurf" ? "fertig" : item.status });
+  };
+
+  const addPremiumTeaser = (item) => {
+    const post = premiumTeaserPost(profile, item);
+    setState((s) => ({ ...s, posts: [...s.posts, post] }));
+    toast.success(`Teaser für morgen in den Content-Plan von ${profile.name} gelegt`);
+  };
+
+  const copyPremiumText = async (item) => {
+    const text = premiumText(profile, item);
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success("Text kopiert – jetzt bei Patreon, Steady oder in den Instagram-Abos einfügen");
+    } catch {
+      await saveFile(`premium_${item.id}.txt`, text, "text/plain;charset=utf-8");
+    }
+  };
 
   const setBusy = (id, value) => setBusyIds((b) => {
     const next = { ...b };
@@ -804,7 +912,7 @@ export default function InfluencerManagerStudio({
       {/* Main */}
       <main className="flex-1 min-w-0 min-h-0 flex flex-col">
         <div className="flex flex-wrap items-center gap-1 px-4 md:px-6 pt-4 pb-3 border-b border-white/[0.07] shrink-0">
-          {[["plan", "Content-Plan"], ["profil", "Profil"], ["analytics", "Reichweite"], ["ideen", "Prompt-Ideen"], ["overview", "Übersicht"], ["auto", "Automatik"]].map(([id, label]) => (
+          {[["plan", "Content-Plan"], ["profil", "Profil"], ["analytics", "Reichweite"], ["ideen", "Prompt-Ideen"], ["premium", "🔒 Premium"], ["overview", "Übersicht"], ["auto", "Automatik"]].map(([id, label]) => (
             <button key={id} type="button" onClick={() => setView(id)}
               className={`px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-colors ${view === id ? "bg-white/10 text-white" : "text-gray-500 hover:text-gray-300"}`}>
               {label}
@@ -912,6 +1020,34 @@ export default function InfluencerManagerStudio({
                   </p>
                 )}
               </div>
+            </div>
+          )}
+
+          {view === "premium" && (
+            <div className="space-y-3 max-w-4xl">
+              <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3 space-y-2">
+                <p className="text-[13px] font-semibold text-amber-100">Premium-Bereich von {profile.name}</p>
+                <p className="text-[11px] text-amber-100/70">
+                  Exklusive Inhalte für zahlende Abonnent:innen (Instagram-Abos, Patreon, Steady): Guides, Pläne, Behind the Scenes und Q&As zu den Themen von {profile.name}.
+                  Bilder in Premium-Qualität (ca. {formatUsd(IMAGE_QUALITY.premium.pricePerImage)} pro Bild), ein Teaser-Post lockt aus dem Feed dorthin.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <button className={primaryBtnCls} onClick={() => createPremiumPacks([profile.id])}>+ Premium-Paket für {profile.name}</button>
+                  <button className={btnCls} onClick={() => createPremiumPacks(allIds)}>Premium-Pakete für alle</button>
+                </div>
+              </div>
+              {premiumItems.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-white/10 p-10 text-center text-[12px] text-gray-500">
+                  Noch keine Premium-Inhalte. Erstelle ein Paket mit drei Ideen.
+                </div>
+              ) : premiumItems.map((item) => (
+                <PremiumCard key={item.id} item={item} busy={!!busyIds[item.id]}
+                  onUpdate={(patch) => updatePremium(item.id, patch)}
+                  onGenerate={() => generatePremiumImage(item)}
+                  onTeaser={() => addPremiumTeaser(item)}
+                  onCopy={() => copyPremiumText(item)}
+                  onDelete={() => deletePremium(item.id)} />
+              ))}
             </div>
           )}
 

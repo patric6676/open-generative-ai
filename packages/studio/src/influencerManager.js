@@ -258,6 +258,7 @@ export function createDefaultState() {
       ...p,
     })),
     posts: [],
+    premium: [],
     settings: { ...DEFAULT_SETTINGS },
   };
 }
@@ -311,7 +312,9 @@ export function parseState(raw) {
     });
     if (profiles.length === 0) return createDefaultState();
     const posts = data.posts.slice(0, MAX_POSTS).map((p) => sanitizePost(p, seen)).filter(Boolean);
-    return { version: 1, profiles, posts, settings: sanitizeSettings(data.settings) };
+    const premium = (Array.isArray(data.premium) ? data.premium : [])
+      .slice(0, MAX_PREMIUM).map((p) => sanitizePremium(p, seen)).filter(Boolean);
+    return { version: 1, profiles, posts, premium, settings: sanitizeSettings(data.settings) };
   } catch {
     return createDefaultState();
   }
@@ -353,12 +356,14 @@ export function buildImagePrompt(profile, post) {
 // Built for a real-looking photo: one named light source, a real lens,
 // skin texture instead of "ultra realistic" superlatives, a calm but real
 // background so edit models can lift the face cleanly.
-export function buildAvatarPrompt(profile) {
+function adultSubject(profile) {
   const appearance = String(profile?.appearance || "").trim();
-  let subject = appearance;
-  if (!/\badult\b/i.test(subject)) {
-    subject = /\b\d{2}\s*-?\s*year/i.test(subject) ? `adult, ${subject}` : `adult in their mid-twenties, ${subject}`;
-  }
+  if (/\badult\b/i.test(appearance)) return appearance;
+  return /\b\d{2}\s*-?\s*year/i.test(appearance) ? `adult, ${appearance}` : `adult in their mid-twenties, ${appearance}`;
+}
+
+export function buildAvatarPrompt(profile) {
+  const subject = adultSubject(profile);
   return [
     subject,
     "head-and-shoulders portrait, facing the camera with a relaxed natural smile",
@@ -699,6 +704,7 @@ export function removeProfile(state, profileId) {
     ...state,
     profiles: state.profiles.filter((p) => p.id !== profileId),
     posts: state.posts.filter((p) => p.profileId !== profileId),
+    premium: (state.premium || []).filter((p) => p.profileId !== profileId),
   };
 }
 
@@ -733,4 +739,165 @@ export function bulkImageQueue(state, profileIds, now = new Date(), withinDays =
 
 export function formatUsd(amount) {
   return `$${(Math.round(amount * 100) / 100).toFixed(2)}`;
+}
+
+// ── Premium content ─────────────────────────────────────────────────────────
+// Exclusive material for paying subscribers (Instagram subscriptions,
+// Patreon, Steady): guides, plans and behind-the-scenes series built on the
+// profile's own pillars. Each item can get one premium-quality image and a
+// teaser post for the public feed.
+
+export const PREMIUM_STATUS = ["entwurf", "fertig", "veröffentlicht"];
+export const PREMIUM_TEASER = "🔒 Exklusiv für Abonnent:innen – Link in der Bio";
+const MAX_PREMIUM = 500;
+const MAX_OUTLINE = 12;
+
+export const PREMIUM_TYPES = {
+  guide: {
+    label: "Guide",
+    title: (pillar) => `Der komplette ${pillar}-Guide`,
+    outline: ["Die Grundlagen in 5 Minuten", "Schritt für Schritt erklärt", "Die 3 häufigsten Fehler", "Meine Routine zum Nachmachen", "Checkliste zum Ausdrucken"],
+    scene: "sitting at a tidy table with an open notebook and a laptop, explaining something mid-sentence with both hands",
+  },
+  plan: {
+    label: "4-Wochen-Plan",
+    title: (pillar) => `4 Wochen ${pillar} – der Plan`,
+    outline: ["Woche 1: Ankommen und Start", "Woche 2: Aufbauen", "Woche 3: Dranbleiben", "Woche 4: Ergebnis und nächste Schritte", "Wöchentlicher Check-in mit mir"],
+    scene: "writing a weekly plan on a paper calendar pinned to the wall, glancing back over the shoulder with a smile",
+  },
+  bts: {
+    label: "Behind the Scenes",
+    title: (pillar) => `Hinter den Kulissen: ${pillar}`,
+    outline: ["Wie ein Tag wirklich aussieht", "Was nicht in den Feed kommt", "Meine Ausrüstung und Lieblingsdinge", "Was als Nächstes kommt"],
+    scene: "laughing during a candid moment between takes, a phone on a small tripod in the foreground",
+  },
+  qa: {
+    label: "Q&A",
+    title: (pillar) => `Eure Fragen zu ${pillar}`,
+    outline: ["Die 5 meistgestellten Fragen", "Ehrliche Antworten ohne Filter", "Eure Tipps aus den Kommentaren", "Frage für die nächste Runde"],
+    scene: "curled up on a sofa with a mug, reading questions on a phone with an amused expression",
+  },
+};
+const PREMIUM_TYPE_ORDER = ["guide", "plan", "bts", "qa"];
+
+export function sanitizePremium(raw, profileIds) {
+  const p = raw && typeof raw === "object" ? raw : null;
+  if (!p || !profileIds.has(p.profileId)) return null;
+  return {
+    id: cleanId(p.id, makeId("premium")),
+    profileId: p.profileId,
+    type: has(PREMIUM_TYPES, p.type) ? p.type : "guide",
+    pillar: cleanText(p.pillar, MAX_TEXT.short) || "Allgemein",
+    title: cleanText(p.title, MAX_TEXT.medium) || "Premium-Inhalt",
+    outline: cleanList(p.outline, MAX_OUTLINE, MAX_TEXT.medium),
+    description: cleanText(p.description, MAX_TEXT.long),
+    prompt: cleanText(p.prompt, MAX_TEXT.long),
+    imageUrl: safeImageUrl(p.imageUrl),
+    status: PREMIUM_STATUS.includes(p.status) ? p.status : "entwurf",
+    createdAt: cleanDate(p.createdAt) || new Date().toISOString(),
+  };
+}
+
+// A calm, polished but real photo: premium means better light and framing,
+// never more skin. The appearance stays first so the face matches the feed.
+export function buildPremiumImagePrompt(profile, item) {
+  const type = PREMIUM_TYPES[item.type] || PREMIUM_TYPES.guide;
+  return [
+    adultSubject(profile),
+    type.scene,
+    `${String(item.pillar || "").toLowerCase()} theme for a ${profile.niche} creator`,
+    "a calm, well-kept real room with two or three personal details",
+    "soft window light from the left with a warm lamp in the background",
+    "50mm lens at f/2, editorial magazine look, shallow depth of field",
+    "natural skin texture with visible pores, flyaway hairs, true-to-life colors, unretouched",
+    "4:5",
+  ].join(", ");
+}
+
+export function createPremiumItem(profile, typeKey, pillar) {
+  const type = PREMIUM_TYPES[typeKey] || PREMIUM_TYPES.guide;
+  const item = {
+    id: makeId("premium"),
+    profileId: profile.id,
+    type: has(PREMIUM_TYPES, typeKey) ? typeKey : "guide",
+    pillar: pillar || "Allgemein",
+    title: type.title(pillar || profile.niche || "Allgemein"),
+    outline: [...type.outline],
+    description: `Exklusiv für meine Abonnent:innen: ${type.label} zu ${pillar || profile.niche}. `
+      + `Ausführlicher als im Feed, mit allem, was ich selbst nutze.`,
+    imageUrl: "",
+    status: "entwurf",
+    createdAt: new Date().toISOString(),
+  };
+  item.prompt = buildPremiumImagePrompt(profile, item);
+  return item;
+}
+
+// Three new items per profile, one per pillar, rotating the types and
+// skipping titles the profile already has.
+export function premiumPackFor(profile, existing = [], count = 3) {
+  const pillars = profile.pillars?.length ? profile.pillars : [profile.niche || "Allgemein"];
+  const taken = new Set(existing.filter((p) => p.profileId === profile.id).map((p) => p.title));
+  const offset = existing.filter((p) => p.profileId === profile.id).length;
+  const items = [];
+  const types = PREMIUM_TYPE_ORDER.length;
+  for (let i = 0; items.length < count && i < pillars.length * types; i += 1) {
+    // Shift the pillar once per round of types so every combination comes up.
+    const k = offset + i;
+    const typeKey = PREMIUM_TYPE_ORDER[k % types];
+    const pillar = pillars[(k + Math.floor(k / types)) % pillars.length];
+    const item = createPremiumItem(profile, typeKey, pillar);
+    if (taken.has(item.title)) continue;
+    taken.add(item.title);
+    items.push(item);
+  }
+  return items;
+}
+
+// A public feed post that points to the premium item.
+export function premiumTeaserPost(profile, item, when) {
+  const platform = profile.platforms?.[0] || "instagram";
+  const scheduled = when ? new Date(when) : new Date();
+  if (!when) {
+    scheduled.setDate(scheduled.getDate() + 1);
+    scheduled.setHours(bestHourFor(platform), 0, 0, 0);
+  }
+  const hashtags = (profile.hashtags || []).join(" ");
+  const caption = [
+    `Neu für meine Abonnent:innen: ${item.title} ✨`,
+    item.outline.slice(0, 3).map((line) => `• ${line}`).join("\n"),
+    PREMIUM_TEASER,
+    hashtags,
+    AI_DISCLOSURE,
+  ].filter(Boolean).join("\n\n");
+  const image = safeImageUrl(item.imageUrl);
+  return {
+    id: makeId("post"),
+    profileId: profile.id,
+    platform,
+    format: "Foto",
+    pillar: "Premium",
+    scene: "",
+    scheduledAt: scheduled.toISOString(),
+    status: image ? "bild" : "idee",
+    imageUrl: image,
+    exportedAt: "",
+    metrics: null,
+    prompt: item.prompt,
+    caption: caption.slice(0, MAX_TEXT.long),
+  };
+}
+
+// Plain text for pasting into Patreon, Steady or Instagram subscriptions.
+export function premiumText(profile, item) {
+  return [
+    item.title,
+    "",
+    item.description,
+    "",
+    ...item.outline.map((line, i) => `${i + 1}. ${line}`),
+    "",
+    `– ${profile.name} ${profile.handle}`.trim(),
+    AI_DISCLOSURE,
+  ].join("\n");
 }
